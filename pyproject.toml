@@ -33,6 +33,7 @@ car-lense-engine = "car_lense_engine.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]
+artifacts = ["src/car_lense_engine/db/migrations/*.sql"]
 
 [tool.ruff]
 line-length = 100
@@ -49,3 +50,9 @@ addopts = "-q"
 python_version = "3.11"
 strict = true
 ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

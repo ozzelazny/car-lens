@@ -8,8 +8,8 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 ## Phase 1 — Catalog and crawler infrastructure
 
-- [~] **1.1** Project scaffold (pyproject.toml, src/ layout, .gitignore, ruff config, pytest config)
-- [ ] **1.2** SQLite schema + DB access layer (listings, images, crawl_queue, dedupe)
+- [x] **1.1** Project scaffold (pyproject.toml, src/ layout, .gitignore, ruff config, pytest config)
+- [x] **1.2** SQLite schema + DB access layer (listings, images, crawl_queue, dedupe)
 - [ ] **1.3** NHTSA vPIC catalog builder — pull canonical (year, make, model) list, cache locally
 - [ ] **1.4** Search-query generator — produce per-site search URLs for top-N (make, model, year) combos
 - [ ] **1.5** Crawler core — Playwright + stealth, request queue, retry/backoff, rate-limit, resume-after-restart
