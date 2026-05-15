@@ -388,3 +388,232 @@ In rough priority order (replaces / amends list 1-8 above):
 - `ruff check .` — All checks passed.
 - `pytest -v` — `297 passed in 14.63s` (no regressions from the
   fixes).
+
+## Third run — 2026-05-15 (after polish + stealth upgrades)
+
+Third smoke run after three follow-up fixes:
+
+- `1e3a279` — BaT trim split into separate column + cars.com
+  `<spark-link-button>` href support + Hemmings slug URL form.
+- `a62390c` — `PlaywrightFetcher.wait_for_selector_by_source`; smoke
+  harness pre-configures AutoTrader with an inventory-grid selector
+  list.
+- `f84ccb9` — `playwright-stealth` 2.x + Chromium automation-flag
+  disable + `navigator.webdriver` override (targeting the Cars & Bids
+  Cloudflare block).
+
+### Status changes vs run 2
+
+| Site         | Run 2                       | Run 3                       | Notes |
+|--------------|-----------------------------|-----------------------------|-------|
+| cars.com     | 200 + 0 listings            | **403 (regressed)**         | curl_cffi now blocked at the network layer where it cleared in run 2; spark-link-button code path never exercised |
+| AutoTrader   | unhydrated 4 KB shell       | **200 + still 0 listings**  | wait_for_selector timed out (10 s) but search completed; parser still found no cards |
+| Craigslist   | 17 listing URLs (all pending) | **17 listing URLs (all pending)** | unchanged config; consistent |
+| BaT          | 14 listings, model absorbed trim | **14 listings, trim populated for most rows** | trim split fix delivered; one residual case ("Del Sol") split wrong |
+| Hemmings     | 200 + redirected to bare category | **200 + still 0 listings** | slug URL form is reachable but the parser still finds 0 listing cards on the rendered HTML |
+| Cars & Bids  | 403                         | **403 (still)**             | stealth 2.x + automation-flag disable was not enough |
+
+### Run summary
+
+- Total elapsed: **197.2 s** (vs 186.4 s in run 2 — almost identical;
+  the 10 s AutoTrader selector wait + Playwright init eat the slack).
+- Crawler `exit_reason`: **`max_items_reached`** (hit the 20-item cap
+  again; 46 items remain pending: 14 BaT listings, 14 BaT images, 17
+  Craigslist listings, 1 Hemmings pagination URL).
+- Total fetches: **18 succeeded / 2 failed** (cars.com 403,
+  Cars & Bids 403).
+- Listings inserted: **14** (all BaT, same as run 2 — `max_items`
+  again starves the Craigslist queue).
+- URLs enqueued: **60** (28 BaT listings + 14 BaT images + 17
+  Craigslist listings + 1 Hemmings pagination URL — identical to
+  run 2).
+
+### Per-site results
+
+#### cars.com — regressed to 403
+
+- Search page: **HTTP 403 via curl_cffi**. This is a regression from
+  run 2 (which got 200). The `<spark-link-button>` parser support
+  shipped in `1e3a279` was therefore not exercised at all.
+- Listing URLs discovered: 0
+- Listings parsed: 0
+- **Status**: Cloudflare appears to have either (a) tightened
+  fingerprinting against curl_cffi's Chrome 131 impersonation since
+  run 2, or (b) IP-rate-limited / soft-banned the WSL2 egress after
+  multiple back-to-back smoke runs. Either way, the parser-side fix
+  in `1e3a279` is now untestable end-to-end. We need to either
+  validate it against a saved fixture or wait out the rate-limit.
+
+#### AutoTrader — wait_for_selector timed out but search completed
+
+- Search page: **HTTP 200**. Browser warning:
+  `wait_for_selector("[data-cmp='inventoryListing'], ...") timed out`
+  after 10 s (the default `selector_timeout_ms`). After the timeout
+  the fetcher returned whatever HTML was rendered.
+- Listing URLs discovered: 0
+- Listings parsed: 0
+- Parser note: `"no listing cards found on search page; selectors
+  may need updating"` (same as run 2).
+- **Conclusion**: none of the four `data-cmp` / `data-qa` / class
+  selectors we configured matched anything on AutoTrader's actual
+  rendered DOM. Either (a) AutoTrader doesn't use those attribute
+  names anymore, (b) the page is still serving an interstitial,
+  rendering nothing under those selectors at all, or (c) we need a
+  selector that matches whatever AutoTrader's current grid wrapper is
+  called. Next step is to capture the rendered HTML for live
+  inspection (e.g. dump the response body to disk and grep for
+  candidate attributes).
+
+#### Craigslist — same as run 2, queue cap still starves listing fetches
+
+- Search page: **HTTP 200**, 17 listing URLs extracted (identical to
+  run 2 — same listings, same order; the site state hasn't churned).
+- Listing URLs discovered: **17** (all `pending` again — `max_items`
+  fills up on BaT before any Craigslist listing pages get fetched).
+- Listings parsed: 0 (queue cap, not a parser issue).
+- **Action**: this is now a smoke harness issue — `max_items=20` is
+  too small to exercise the Craigslist listing parser when BaT
+  alone yields 28 candidates. Either bump `max_items` to 40+, or
+  add a per-source cap to the smoke runner.
+
+#### Bring a Trailer — trim split fix delivered for most rows
+
+- Search page: **HTTP 200**, 28 listing URLs discovered.
+- Listings parsed: **14** with trim split into its own column:
+
+| listing_id                            | year | make  | model      | trim                  |
+|---------------------------------------|------|-------|------------|-----------------------|
+| bat:1986-honda-civic-22               | 1986 | Honda | Civic      | Si                    |
+| bat:1988-honda-crx-si-33              | 1988 | Honda | Crx        | Si 5-Speed            |
+| bat:1989-honda-crx-si-48              | 1989 | Honda | Crx        | Si 5-Speed            |
+| bat:1991-honda-crx-89                 | 1991 | Honda | Crx        | 1.6I-Vt 5-Speed       |
+| bat:1991-honda-crx-hf-4               | 1991 | Honda | Crx        | Hf 5-Speed            |
+| bat:1991-honda-crx-si-14              | 1991 | Honda | Crx        | Si 5-Speed            |
+| bat:1993-honda-civic-del-sol-37       | 1993 | Honda | Civic      | Del Sol Si 5-Speed    |
+| bat:1993-honda-civic-del-sol-40       | 1993 | Honda | Civic      | Del Sol S 5-Speed     |
+| bat:1994-honda-civic-del-sol-5        | 1994 | Honda | Civic      | Del Sol S 5-Speed     |
+| bat:1995-honda-civic-5                | 1995 | Honda | Civic      | Cx Hatchback 5-Speed  |
+| bat:1997-honda-del-sol-3              | 1997 | Honda | **Del**    | **Sol Si 5-Speed**    |
+| bat:2000-honda-civic-81               | 2000 | Honda | Civic      | Type Rx               |
+| bat:2018-honda-civic-type-r-touring-5 | 2018 | Honda | Civic      | Type R Touring        |
+| bat:2018-honda-civic-type-r-touring-7 | 2018 | Honda | Civic      | Type R Touring        |
+
+- **Headline**: the trim split worked. `trim` is now populated for
+  every row that had a multi-token tail. Single-token models (Civic,
+  Crx) correctly receive their non-model words as trim instead of
+  swallowing them into `model`.
+- **Headline win — single-word models stay single-word**:
+  - Civic stays "Civic" (trim "Si" or "Type R Touring" etc.)
+  - Crx stays "Crx" (trim "Si 5-Speed", "Hf 5-Speed", etc.)
+- **Residual bug**: row `bat:1997-honda-del-sol-3` shows
+  `model="Del", trim="Sol Si 5-Speed"`. The parser doesn't recognise
+  "Del Sol" as a two-word model. The other Del Sol rows
+  (1993, 1994) carried the prefix `Civic` (BaT named them
+  `"... Civic Del Sol Si"`) so they got `model=Civic,
+  trim="Del Sol ..."` — also not perfect, but at least `model`
+  is the more-famous name. A two-word-model lookup (or a small
+  hand-maintained alias list) would fix both.
+- Trim values for `1991-honda-crx-89` show `1.6I-Vt` — that's the
+  BaT name field's title-casing artifact (originally `1.6i-VT`).
+  Cosmetic; downstream consumers can normalise.
+
+#### Hemmings — slug URL form reachable, still 0 listings parsed
+
+- Search page: **HTTP 200 via curl_cffi**. The slug URL form
+  (`/classifieds/cars-for-sale?Make=honda&Model=civic`) returned a
+  full page.
+- Listing URLs discovered: 0
+- Listings parsed: 0
+- Parser note: `"no listing cards found on search page; selectors
+  may need updating"`.
+- The parser DID find a pagination URL (`?page=2` — still pending in
+  the queue), so it's not pure noise — but the listing-card
+  selector still doesn't match anything on the page.
+- **Action**: capture and inspect the response body; the slug-URL
+  fix gets us a real page back, but the parser's listing-card
+  selectors are still wrong for the rendered HTML.
+
+#### Cars & Bids — still 403, stealth 2.x didn't bypass
+
+- Search page: **HTTP 403**.
+- The stealth upgrade (playwright-stealth 2.x + automation-flag
+  disable + `navigator.webdriver` override) was not sufficient.
+  Cloudflare's challenge is fingerprinting at a deeper level —
+  likely TLS / JA3 or Canvas / WebGL fingerprint — that
+  playwright-stealth doesn't paper over.
+- **Status**: this remains uncrawlable from headless Chromium.
+  Next escalations (in order of effort):
+  1. Try routing C&B through curl_cffi too. C&B is a React SPA so
+     curl_cffi will only see the unhydrated shell; some C&B
+     listing pages may still expose initial state in a JSON blob
+     (`__NEXT_DATA__` style), in which case the parser could read
+     from that.
+  2. Try a non-headless Chromium with `--use-fake-ui-for-media-stream`
+     and a real Canvas / WebGL fingerprint.
+  3. Accept the gap; document; move on.
+
+### Identified follow-up tasks
+
+In rough priority order:
+
+1. **AutoTrader: figure out the real listing-grid selector.** None
+   of the four candidates we tried (`[data-cmp='inventoryListing']`,
+   `[data-cmp='inventoryListingItem']`, `.inventory-listing`,
+   `[data-qa='listing-card']`) matched. Need to dump the rendered
+   HTML to disk and grep / inspect to find the actual wrapper class
+   name. This is now blocking AutoTrader entirely.
+
+2. **Hemmings: figure out the real listing-card selector.** The
+   slug-URL fix gets us a 200 with content, but the parser's
+   selectors still don't match. Same triage as AutoTrader — capture
+   and inspect.
+
+3. **cars.com 403 regression: investigate / wait out.** The fix
+   from `1e3a279` is untested end-to-end. Either rotate egress IP,
+   wait 24 h, or build a parser-unit-test fixture from the run-2
+   HTML capture (if we still have it) to validate the
+   spark-link-button code path without a live fetch.
+
+4. **BaT two-word-model recognition.** "Del Sol" splits as
+   `model=Del, trim=Sol ...`. Either (a) add a small alias list
+   (`Del Sol`, `Type R`, etc. — already special-cased per the Type R
+   rows, so the mechanism exists), or (b) use a real per-make model
+   catalog. Low priority; data is still usable.
+
+5. **Smoke harness: raise `max_items` or add per-source caps.**
+   With BaT yielding 28 listing URLs, the 20-item cap blocks every
+   other site's listing parser. A `max_items=50` run would
+   exercise Craigslist's listing parser at least.
+
+6. **Cars & Bids: try curl_cffi + JSON-blob extraction.** The
+   stealth approach has hit diminishing returns. C&B ships a Next.js
+   app; the initial HTML often contains `__NEXT_DATA__` with the
+   full listing payload. Worth a parser experiment even if the page
+   is otherwise empty.
+
+7. Existing items (BaT mileage/VIN from prose; fetcher fallback
+   chain) remain unchanged from prior runs.
+
+### Open questions
+
+- **Are we OK with the smoke run being non-deterministic re: 403s?**
+  cars.com gave 200 in run 2 and 403 in run 3, with no parser-side
+  change to either site. If Cloudflare is gating us based on recent
+  request volume, every smoke run is gambling against a temporary
+  rate-limit. Options: (a) accept the variance and re-run, (b) move
+  to fixture-based parser tests so smokes only validate
+  integration / network paths, (c) add a backoff between smokes.
+- **Should the AutoTrader / Hemmings selector debugging happen in a
+  one-off "rendered HTML dump" script** (cheaper, focused), or
+  through the smoke run plus a `--save-html` flag (more general,
+  more code)?
+- **Is it worth one more attempt at Cars & Bids** (curl_cffi +
+  `__NEXT_DATA__` extraction), or should we mark C&B as accepted-gap
+  and move on?
+
+### Pytest / lint
+
+- `ruff check .` — All checks passed.
+- `pytest` — `316 passed in 15.20s` (no regressions from the
+  fixes; +19 new tests since run 2 covering BaT trim split,
+  spark-link-button hrefs, slug URL form, and `wait_for_selector_by_source`).
