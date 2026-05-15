@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from car_lense_engine.crawler.parsers import CarsComParser
@@ -15,6 +16,23 @@ SEARCH_FIXTURE = "cars_com_search.html"
 LISTING_FIXTURE = "cars_com_listing.html"
 SEARCH_URL = "https://www.cars.com/shopping/results/?makes[]=honda&models[]=honda-civic"
 LISTING_URL = "https://www.cars.com/vehicledetail/744993211/"
+
+# Real-world fixture saved by the block diagnostic (commit 12f8cc6) —
+# the actual 1.22 MB SSR'd Honda Civic results page returned by
+# ``CurlCffiFetcher(impersonate="firefox133")`` against cars.com. The
+# fixture is the canonical proof that the parser still works against
+# production HTML; any selector / regex change that lowers the extracted
+# count below the lower bound asserted here breaks the contract.
+REAL_SEARCH_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "real_world"
+    / "cars_com_search_curlcffi_firefox_20260515T205423Z.html"
+)
+# Manual count of distinct ``/vehicledetail/<uuid>/`` ids in the fixture
+# (27 cards × multiple anchor variants each). The parser dedupes by
+# native_id, so the lower bound is the distinct-listing count.
+REAL_SEARCH_MIN_LISTINGS = 27
 
 
 class _LoadFixture(Protocol):
@@ -113,7 +131,9 @@ def test_parse_search_extracts_hrefs_from_spark_link_button() -> None:
 
 def test_parse_search_accepts_overview_suffix() -> None:
     """The href regex accepts ``/overview/``, ``/photos/``, and
-    ``/features/`` sub-routes on a listing-detail URL."""
+    ``/features/`` sub-routes on a listing-detail URL and canonicalises
+    them to the base ``/vehicledetail/<id>/`` form so the worker does not
+    re-crawl photo / feature variants as separate listings."""
     html = """
     <html><body>
       <a class="vehicle-card-link" href="/vehicledetail/12345/overview/">View</a>
@@ -127,9 +147,9 @@ def test_parse_search_accepts_overview_suffix() -> None:
     listings = [u for u in result.new_urls if u.kind == "listing"]
     listing_urls = sorted(u.url for u in listings)
     assert listing_urls == [
-        "https://www.cars.com/vehicledetail/12345/overview/",
-        "https://www.cars.com/vehicledetail/24680/features/",
-        "https://www.cars.com/vehicledetail/67890/photos/",
+        "https://www.cars.com/vehicledetail/12345/",
+        "https://www.cars.com/vehicledetail/24680/",
+        "https://www.cars.com/vehicledetail/67890/",
     ]
 
 
@@ -239,3 +259,38 @@ def test_parse_unknown_kind_returns_note() -> None:
     assert result.new_urls == []
     assert result.new_listing is None
     assert any("unknown kind" in n for n in result.notes)
+
+
+# ---------- real-world fixture ----------------------------------------------
+
+
+def test_parse_search_real_html_extracts_listings() -> None:
+    """Smoke test against the saved 1.22 MB real cars.com SSR'd page.
+
+    The fixture is the actual response produced by
+    ``CurlCffiFetcher(impersonate="firefox133")`` against
+    ``https://www.cars.com/shopping/results/?makes[]=honda&models[]=honda-civic``
+    on 2026-05-15. Real cards use ``<a href="/vehicledetail/<uuid>/?attribution_type=...">``,
+    ``<fuse-button href=...>``, and ``<card-gallery card-href=...>`` —
+    all three must be picked up and deduped by native id.
+    """
+    html = REAL_SEARCH_FIXTURE.read_text(encoding="utf-8")
+    parser = CarsComParser()
+    result = parser.parse(html=html, url=SEARCH_URL, kind="search", hints={})
+
+    assert isinstance(result, ParseResult)
+    listings = [u for u in result.new_urls if u.kind == "listing"]
+    assert len(listings) >= REAL_SEARCH_MIN_LISTINGS, (
+        f"expected >= {REAL_SEARCH_MIN_LISTINGS} listings, got {len(listings)}"
+    )
+    # The parser canonicalises every variant down to ``/vehicledetail/<id>/``
+    # so the URL set has no duplicate native ids and no query strings.
+    seen_ids: set[str] = set()
+    for du in listings:
+        assert du.source == "cars_com"
+        assert du.url.startswith("https://www.cars.com/vehicledetail/")
+        assert du.url.endswith("/")
+        assert "?" not in du.url, f"query string leaked into canonical URL: {du.url}"
+        native_id = du.url.rstrip("/").rsplit("/", 1)[-1]
+        assert native_id not in seen_ids, f"duplicate native id: {native_id}"
+        seen_ids.add(native_id)

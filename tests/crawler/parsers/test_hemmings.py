@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from car_lense_engine.crawler.parsers import HemmingsParser
@@ -15,6 +16,22 @@ SEARCH_FIXTURE = "hemmings_search.html"
 LISTING_FIXTURE = "hemmings_listing.html"
 SEARCH_URL = "https://www.hemmings.com/classifieds/cars-for-sale?Make=Chevrolet&Model=Camaro"
 LISTING_URL = "https://www.hemmings.com/classifieds/dealer/chevrolet/camaro/2845391/"
+
+# Real-world fixture saved by the block diagnostic (commit 12f8cc6) — the
+# actual 319 KB Livewire-rendered Hemmings page returned by
+# ``CurlCffiFetcher(impersonate="chrome131")`` against the
+# Honda Civic classifieds search slug.
+REAL_SEARCH_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "real_world"
+    / "hemmings_search_curlcffi_chrome131_20260515T205423Z.html"
+)
+REAL_SEARCH_URL = "https://www.hemmings.com/classifieds/cars-for-sale/honda/civic"
+# Manual count: 7 unique ``/classifieds/listing/<slug>-<id>`` ids in the
+# saved fixture (each listing appears twice — once as the card anchor,
+# once as a sub-element link — so the deduped count is 7).
+REAL_SEARCH_MIN_LISTINGS = 7
 
 
 class _LoadFixture(Protocol):
@@ -204,3 +221,33 @@ def test_parse_unknown_kind_returns_note() -> None:
     assert result.new_urls == []
     assert result.new_listing is None
     assert any("unknown kind" in n for n in result.notes)
+
+
+# ---------- real-world fixture ----------------------------------------------
+
+
+def test_parse_search_real_html_extracts_listings() -> None:
+    """Smoke test against the saved 319 KB real Hemmings page.
+
+    The fixture is the actual response produced by
+    ``CurlCffiFetcher(impersonate="chrome131")`` against the Honda Civic
+    classifieds search slug on 2026-05-15. Real cards use the
+    ``/classifieds/listing/<year>-<make>-<model>-<city>-<state>-<id>``
+    URL shape — the trailing numeric segment is captured as the native id.
+    """
+    html = REAL_SEARCH_FIXTURE.read_text(encoding="utf-8")
+    parser = HemmingsParser()
+    result = parser.parse(html=html, url=REAL_SEARCH_URL, kind="search", hints={})
+
+    assert isinstance(result, ParseResult)
+    listings = [u for u in result.new_urls if u.kind == "listing"]
+    assert len(listings) >= REAL_SEARCH_MIN_LISTINGS, (
+        f"expected >= {REAL_SEARCH_MIN_LISTINGS} listings, got {len(listings)}"
+    )
+    seen_urls: set[str] = set()
+    for du in listings:
+        assert du.source == "hemmings"
+        assert du.url.startswith("https://www.hemmings.com/")
+        assert "/classifieds/" in du.url or "/auctions/" in du.url
+        assert du.url not in seen_urls, f"duplicate listing url: {du.url}"
+        seen_urls.add(du.url)

@@ -1,14 +1,16 @@
 """Hemmings parser — search pages and individual listing pages.
 
-Hemmings ships two coexisting listing URL shapes:
+Hemmings ships three coexisting listing URL shapes (observed against the
+saved real-world fixture in ``tests/crawler/parsers/fixtures/real_world``):
 
-* classifieds: ``https://www.hemmings.com/classifieds/dealer/<make>/<model>/<id>``
-* auctions:    ``https://www.hemmings.com/auctions/<slug>/<id>``
+* classifieds (dealer):  ``https://www.hemmings.com/classifieds/dealer/<make>/<model>/<id>``
+* classifieds (listing): ``https://www.hemmings.com/classifieds/listing/<year>-<make>-<model>-<city>-<state>-<id>``
+* auctions:              ``https://www.hemmings.com/auctions/<slug>/<id>``
 
-In both shapes the trailing path segment is a 6+ digit numeric native id we
-expose as ``listing_id = "hemmings:<id>"``. Listing pages embed JSON-LD —
-classifieds usually as ``Vehicle``, auctions as ``Product`` (sometimes
-``Car``). We try Vehicle, then Car, then Product.
+In every shape the trailing token of the final path segment is a 6+ digit
+numeric native id we expose as ``listing_id = "hemmings:<id>"``. Listing
+pages embed JSON-LD — classifieds usually as ``Vehicle``, auctions as
+``Product`` (sometimes ``Car``). We try Vehicle, then Car, then Product.
 
 Both flows are defensive: any unexpected shape is logged via
 :class:`ParseResult.notes` rather than raising.

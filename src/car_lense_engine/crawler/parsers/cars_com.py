@@ -31,13 +31,22 @@ logger = logging.getLogger(__name__)
 
 
 # Listing-card href shape: ``/vehicledetail/{native_id}/`` (trailing slash
-# optional). cars.com also exposes sub-routes on the same listing —
-# ``/overview/``, ``/photos/``, ``/features/`` — that we accept as
-# equivalent entry points.
-_LISTING_HREF_RE = re.compile(r"^/vehicledetail/[^/]+(?:/(?:overview|photos|features))?/?$")
+# optional). Real cars.com pages also append a query string —
+# ``?attribution_type=p_one``, ``?openLeadForm=true``, etc. — on the same
+# anchor; we accept (and later strip) those. cars.com also exposes
+# sub-routes on the same listing — ``/overview/``, ``/photos/``,
+# ``/features/`` — that we accept as equivalent entry points. The host
+# prefix is optional so both relative (``/vehicledetail/...``) and absolute
+# (``https://www.cars.com/vehicledetail/...``) anchors match.
+_LISTING_HREF_RE = re.compile(
+    r"^(?:https?://(?:www\.)?cars\.com)?"
+    r"/vehicledetail/[^/?#]+"
+    r"(?:/(?:overview|photos|features))?"
+    r"/?(?:\?[^#]*)?$"
+)
 
 # Native ID extractor from a full listing URL path.
-_LISTING_ID_FROM_URL_RE = re.compile(r"/vehicledetail/([^/?#]+)/?")
+_LISTING_ID_FROM_URL_RE = re.compile(r"/vehicledetail/([^/?#]+)")
 
 
 class CarsComParser:
@@ -77,25 +86,43 @@ class CarsComParser:
         target_make = _as_str(hints.get("target_make"))
         target_model = _as_str(hints.get("target_model"))
 
-        # Match listing hrefs in BOTH plain ``<a>`` tags AND
-        # ``<spark-link-button>`` custom elements. cars.com migrated newer
-        # listing cards to a Web Component that BeautifulSoup's
-        # ``find_all("a", href=True)`` does not pick up, so we broaden the
-        # tag selector to keep both old and new card shapes working.
+        # Pull listing hrefs from every tag shape cars.com currently uses:
+        #
+        # * plain ``<a href="/vehicledetail/...">`` — the canonical anchor.
+        # * ``<fuse-button href="...">`` — the "View Listing" CTA on each
+        #   card; one per card, duplicated alongside the plain anchor.
+        # * ``<card-gallery card-href="...">`` — the photo-carousel wrapper
+        #   on each card; the link is on a non-standard attribute.
+        # * ``<spark-link-button href="...">`` — legacy/transitional shape
+        #   retained for safety.
+        #
+        # Real cars.com pages emit several hrefs per listing (varying query
+        # strings such as ``?attribution_type=p_one``) so we dedupe by the
+        # extracted ``native_id`` and keep the first canonical form we see
+        # for that id.
         listing_urls: list[str] = []
-        seen: set[str] = set()
-        for tag in soup.find_all(["a", "spark-link-button"]):
-            href = tag.get("href")
-            if not isinstance(href, str):
-                continue
-            stripped = href.strip()
-            if not stripped or not _LISTING_HREF_RE.match(stripped):
-                continue
-            absolute = normalize_url(url, stripped)
-            if absolute in seen:
-                continue
-            seen.add(absolute)
-            listing_urls.append(absolute)
+        seen_ids: set[str] = set()
+        tag_attr_candidates: list[tuple[list[str], str]] = [
+            (["a", "fuse-button", "spark-link-button"], "href"),
+            (["card-gallery"], "card-href"),
+        ]
+        for tag_names, attr in tag_attr_candidates:
+            for tag in soup.find_all(tag_names):
+                href = tag.get(attr)
+                if not isinstance(href, str):
+                    continue
+                stripped = href.strip()
+                if not stripped or not _LISTING_HREF_RE.match(stripped):
+                    continue
+                native_id = _extract_native_id(stripped)
+                if native_id is None or native_id in seen_ids:
+                    continue
+                seen_ids.add(native_id)
+                # Drop the query string entirely — cars.com listing pages
+                # do not need ``?attribution_type=...`` etc., and stripping
+                # gives us a stable canonical URL for downstream dedup.
+                canonical = f"/vehicledetail/{native_id}/"
+                listing_urls.append(normalize_url(url, canonical))
 
         new_urls: list[DiscoveredUrl] = [
             DiscoveredUrl(
