@@ -9,6 +9,7 @@ by ``QueueItem.source`` in the worker loop.
 
 from __future__ import annotations
 
+from .autotrader import AutoTraderParser
 from .base import DiscoveredUrl, ParsedListing, Parser, ParseResult
 from .cars_com import CarsComParser
 from .common import (
@@ -22,6 +23,7 @@ from .common import (
 )
 
 __all__ = [
+    "AutoTraderParser",
     "CarsComParser",
     "DiscoveredUrl",
     "ParseResult",

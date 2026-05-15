@@ -17,7 +17,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 ## Phase 2 — Per-site parsers
 
 - [x] **2.1** cars.com listing parser + image extractor
-- [ ] **2.2** AutoTrader listing parser + image extractor
+- [x] **2.2** AutoTrader listing parser + image extractor
 - [ ] **2.3** Craigslist listing parser (free-text title → structured label)
 - [ ] **2.4** Bring a Trailer / Hemmings / Cars & Bids parsers
 
