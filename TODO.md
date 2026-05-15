@@ -53,6 +53,9 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 ## Known follow-ups (non-blocking)
 
 - Catalog Title Case loses canonical capitalization for compound names: `"MCLAREN"` → `"Mclaren"`, not `"McLaren"`; same for `"BMW"` (becomes `"Bmw"`). Acceptable for taxonomy + matching, but the app's display layer will need a canonical-name override table eventually.
+- BaT name-parse doesn't recognize two-word *models* like `"Del Sol"`, `"Type R"`. Two-word-make matching exists (Land Rover, Alfa Romeo) but no symmetric two-word-model logic. A `1997 Honda Del Sol` listing comes out as `model="Del", trim="Sol Si 5-Speed"`. Affects a handful of model families.
+- `parse_proxy_url` still echoes the raw URL in the `"missing scheme"` `ValueError` (e.g. `//user:pass@host:8080` → message contains credentials). Triggered only by schemeless input, which is unusual but possible. The missing-host and missing-port paths were fixed in `b390fa4`; this third path remains as the only residual leak surface.
+- Crawler smoke results are non-deterministic against Cloudflare-protected sites (cars.com observed flipping 200→403 between identical runs). Validation of parser fixes for those sites requires either consistent access via residential proxy OR a fixture-based test against saved HTML snapshots.
 
 ## Status legend
 
