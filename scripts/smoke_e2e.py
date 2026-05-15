@@ -21,6 +21,7 @@ blocks, document and move on; do NOT attempt to defeat the block.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -321,6 +322,11 @@ def main() -> int:
             off_peak_only=False,
             idle_exit_seconds=10,
         )
+        # Optional residential proxy: set PROXY_URL env var to route ALL crawler
+        # traffic (both Playwright and curl_cffi) through a residential proxy.
+        # Helps with IP-reputation Cloudflare blocks on cars.com / C&B / Hemmings.
+        # Example: export PROXY_URL='http://user:pass@gate.smartproxy.com:7000'
+        proxy_url: str | None = os.environ.get("PROXY_URL") or None
         # The 2026-05-15 smoke run found AutoTrader returning unhydrated 4 KB
         # shells and Craigslist returning inconsistent (~155 KB vs ~35 KB)
         # responses with the previous defaults (wait_until="domcontentloaded",
@@ -334,6 +340,7 @@ def main() -> int:
             settle_ms=5000,
             navigation_timeout_ms=45_000,
             wait_for_selector_by_source=WAIT_FOR_SELECTOR_BY_SOURCE,
+            proxy=proxy_url,
         )
         # Route cars.com and Hemmings through curl_cffi: Playwright+stealth was
         # 403'd by Cloudflare on both, almost certainly because of the headless
@@ -346,7 +353,7 @@ def main() -> int:
         # shell. The C&B block is a separate problem (likely still Cloudflare,
         # but solving it via curl_cffi would not help — the parser needs the
         # post-hydration DOM).
-        curl_fetcher = CurlCffiFetcher()
+        curl_fetcher = CurlCffiFetcher(proxy=proxy_url)
         fetcher = MultiFetcher(
             per_source={
                 "cars_com": curl_fetcher,

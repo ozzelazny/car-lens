@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from .browser import (
 from .curlcffi_fetcher import CurlCffiFetcher
 from .fetcher import Fetcher
 from .politeness import PolicyConfig
+from .proxy import mask_proxy_url, validate_proxy_url
 from .registry import ParserRegistry
 from .routing import MultiFetcher, known_sources
 from .runner import run_crawler
@@ -173,6 +175,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--proxy",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "route ALL crawler traffic through a residential proxy. Accepts "
+            "http://, https://, socks4://, socks5:// with optional user:pass@ "
+            "credentials (e.g. 'http://user:pass@gate.smartproxy.com:7000'). "
+            "Applies to both PlaywrightFetcher and CurlCffiFetcher. Falls back "
+            "to the PROXY_URL environment variable when the flag is omitted."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -190,12 +205,16 @@ def _make_fetcher(
     curl_cffi_sources: tuple[str, ...] = (),
     wait_for_selector_by_source: dict[str, str] | None = None,
     selector_timeout_ms: int = DEFAULT_SELECTOR_TIMEOUT_MS,
+    proxy: str | None = None,
 ) -> Fetcher:
     """Default fetcher factory; overridden in tests via :func:`main` argument.
 
     When ``curl_cffi_sources`` is non-empty, wraps the Playwright fetcher in a
     :class:`MultiFetcher` that routes the named sources through a shared
     :class:`CurlCffiFetcher` and leaves everything else on Playwright.
+
+    ``proxy`` (when set) is applied to BOTH inner fetchers so every request —
+    Playwright-driven or curl_cffi-driven — egresses through the same proxy.
     """
     playwright = PlaywrightFetcher(
         headless=headless,
@@ -204,10 +223,11 @@ def _make_fetcher(
         navigation_timeout_ms=navigation_timeout_ms,
         wait_for_selector_by_source=wait_for_selector_by_source,
         selector_timeout_ms=selector_timeout_ms,
+        proxy=proxy,
     )
     if not curl_cffi_sources:
         return playwright
-    curl = CurlCffiFetcher()
+    curl = CurlCffiFetcher(proxy=proxy)
     per_source: dict[str, Fetcher] = dict.fromkeys(curl_cffi_sources, curl)
     return MultiFetcher(per_source=per_source, default=playwright)
 
@@ -308,6 +328,19 @@ def main(
     if args.selector_timeout_ms <= 0:
         parser.error(f"--selector-timeout-ms must be > 0, got {args.selector_timeout_ms}")
 
+    # Resolve the proxy URL with the documented precedence: --proxy flag wins,
+    # otherwise PROXY_URL env var, otherwise no proxy. Validate up front so a
+    # bad URL fails with exit code 2 before we open the DB or import Playwright.
+    raw_proxy: str | None = args.proxy if args.proxy else os.environ.get("PROXY_URL")
+    if raw_proxy is not None and raw_proxy.strip() == "":
+        raw_proxy = None
+    resolved_proxy: str | None = None
+    if raw_proxy is not None:
+        try:
+            resolved_proxy = validate_proxy_url(raw_proxy)
+        except ValueError as exc:
+            parser.error(f"--proxy: {exc}")
+
     db_path: Path = args.db
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
@@ -330,15 +363,19 @@ def main(
             )
 
         q_stats = queue.stats(conn, source=args.source)
+        # IMPORTANT: only log the masked (credentials-free) form of the proxy.
+        # The raw URL must never appear in logs.
+        proxy_log_repr = mask_proxy_url(resolved_proxy) if resolved_proxy is not None else "<none>"
         log.info(
             "crawl starting: db=%s source=%s policy=[min=%.1f max=%.1f off_peak=%s "
-            "idle_exit=%ds] queue=[pending=%d in_progress=%d done=%d failed=%d dead=%d]",
+            "idle_exit=%ds] proxy=%s queue=[pending=%d in_progress=%d done=%d failed=%d dead=%d]",
             db_path,
             args.source or "<all>",
             policy.min_delay_seconds,
             policy.max_delay_seconds,
             policy.off_peak_only,
             policy.idle_exit_seconds,
+            proxy_log_repr,
             q_stats.pending,
             q_stats.in_progress,
             q_stats.done,
@@ -357,6 +394,7 @@ def main(
             curl_cffi_sources=curl_cffi_sources,
             wait_for_selector_by_source=wait_for_selector_by_source,
             selector_timeout_ms=args.selector_timeout_ms,
+            proxy=resolved_proxy,
         )
         try:
             summary = run_crawler(

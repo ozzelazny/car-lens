@@ -252,3 +252,68 @@ def test_fetcher_context_manager_closes(fake_session_holder: list[_FakeSession])
         session.default_response = _FakeResponse(status_code=200, text="ok", url="https://x.test/")
         fetcher.fetch("https://x.test/")
     assert session.closed is True
+
+
+# ----------------------------------------------------------- proxy support
+
+
+def test_curlcffi_fetcher_accepts_proxy(fake_session_holder: list[_FakeSession]) -> None:
+    """A valid proxy URL configures session.proxies on the underlying Session."""
+    fetcher = CurlCffiFetcher(proxy="http://u:p@gate.example.com:7000")
+    fetcher._ensure_session()  # noqa: SLF001
+    session = fake_session_holder[-1]
+    # _FakeSession doesn't pre-declare a proxies attr; the fetcher assigns it.
+    proxies = getattr(session, "proxies", None)
+    assert isinstance(proxies, dict)
+    assert proxies["http"] == "http://u:p@gate.example.com:7000"
+    assert proxies["https"] == "http://u:p@gate.example.com:7000"
+    fetcher.close()
+
+
+def test_curlcffi_fetcher_no_proxy_leaves_session_proxies_unset(
+    fake_session_holder: list[_FakeSession],
+) -> None:
+    """Without a proxy kwarg, the fetcher must NOT touch session.proxies.
+
+    The fake session has no ``proxies`` attribute by default; if the fetcher
+    set one we'd see it via ``hasattr``.
+    """
+    fetcher = CurlCffiFetcher()
+    fetcher._ensure_session()  # noqa: SLF001
+    session = fake_session_holder[-1]
+    assert not hasattr(session, "proxies")
+    fetcher.close()
+
+
+def test_curlcffi_fetcher_rejects_invalid_proxy() -> None:
+    """A bad proxy URL must raise ValueError before any session is created."""
+    with pytest.raises(ValueError):
+        CurlCffiFetcher(proxy="not-a-url")
+
+
+def test_curlcffi_fetcher_rejects_empty_proxy_string() -> None:
+    """An empty-string proxy URL must raise (not silently no-op)."""
+    with pytest.raises(ValueError, match="empty proxy URL"):
+        CurlCffiFetcher(proxy="")
+
+
+def test_curlcffi_fetcher_rejects_unsupported_proxy_scheme() -> None:
+    """ftp:// is not an accepted proxy scheme."""
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        CurlCffiFetcher(proxy="ftp://host:21")
+
+
+def test_curlcffi_fetcher_proxy_credentials_not_in_logs(
+    fake_session_holder: list[_FakeSession],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The startup log line must NOT contain proxy credentials."""
+    caplog.set_level("INFO", logger="car_lense_engine.crawler.core.curlcffi_fetcher")
+    fetcher = CurlCffiFetcher(proxy="http://supersecretuser:supersecretpass@gate.example.com:7000")
+    try:
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "supersecretuser" not in messages
+        assert "supersecretpass" not in messages
+        assert "gate.example.com:7000" in messages
+    finally:
+        fetcher.close()

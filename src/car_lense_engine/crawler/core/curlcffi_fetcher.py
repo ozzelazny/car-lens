@@ -22,6 +22,7 @@ from types import TracebackType
 from typing import Any
 
 from .fetcher import FetchedPage, FetchError
+from .proxy import mask_proxy_url, proxy_url_to_curl_dict
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,18 @@ class CurlCffiFetcher:
         impersonate: str = DEFAULT_IMPERSONATE,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         ua_suffix: str = DEFAULT_UA_SUFFIX,
+        proxy: str | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be > 0, got {timeout_seconds!r}")
         if not impersonate:
             raise ValueError("impersonate must be a non-empty profile name")
+
+        # Validate (and pre-compute) the proxy mapping at construction time so
+        # bad URLs surface immediately, before the lazy curl_cffi import.
+        proxies: dict[str, str] | None = None
+        if proxy is not None:
+            proxies = proxy_url_to_curl_dict(proxy)
 
         self._impersonate = impersonate
         self._timeout_seconds = timeout_seconds
@@ -69,12 +77,17 @@ class CurlCffiFetcher:
         # also want to allow tests to substitute a fake via monkeypatch.
         self._session: Any | None = None
         self._closed = False
+        # Pre-built proxies dict (or None). Stored separately from the raw URL
+        # so we don't accidentally log credentials.
+        self._proxies: dict[str, str] | None = proxies
+        self._proxy_log_repr: str | None = mask_proxy_url(proxy) if proxy is not None else None
 
         logger.info(
-            "CurlCffiFetcher configured: impersonate=%s timeout=%.1fs ua_suffix=%s",
+            "CurlCffiFetcher configured: impersonate=%s timeout=%.1fs ua_suffix=%s proxy=%s",
             self._impersonate,
             self._timeout_seconds,
             self._ua_suffix,
+            self._proxy_log_repr if self._proxies is not None else "<none>",
         )
 
     # ------------------------------------------------------------ public API
@@ -155,5 +168,9 @@ class CurlCffiFetcher:
         # The TLS / JA3 fingerprint comes from the impersonation profile and
         # is independent of the UA string.
         session.headers.update({"User-Agent": self._user_agent})
+        # Wire up the optional residential proxy on the session itself; the
+        # mapping was pre-validated in ``__init__`` so we just hand it over.
+        if self._proxies is not None:
+            session.proxies = dict(self._proxies)
         self._session = session
         return session

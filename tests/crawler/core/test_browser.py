@@ -155,6 +155,153 @@ def test_fetcher_selector_timeout_must_be_positive() -> None:
         PlaywrightFetcher(selector_timeout_ms=-100)
 
 
+def test_fetcher_rejects_invalid_proxy() -> None:
+    """A malformed proxy URL must raise ValueError before any Playwright call."""
+    with pytest.raises(ValueError):
+        PlaywrightFetcher(proxy="not-a-url")
+
+
+def test_fetcher_rejects_empty_proxy_string() -> None:
+    """An empty-string proxy URL must raise ValueError (not be silently ignored)."""
+    with pytest.raises(ValueError, match="empty proxy URL"):
+        PlaywrightFetcher(proxy="")
+
+
+def test_fetcher_rejects_unsupported_proxy_scheme() -> None:
+    """ftp:// is not an accepted proxy scheme."""
+    with pytest.raises(ValueError, match="unsupported proxy scheme"):
+        PlaywrightFetcher(proxy="ftp://host:21")
+
+
+def test_fetcher_accepts_valid_proxy_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed proxy URL must pass validation before Playwright is touched.
+
+    We install the post-validation barrier so the constructor raises after
+    parameter validation but before launching Chromium. Reaching that barrier
+    proves the proxy URL itself validated cleanly.
+    """
+    _install_post_validation_barrier(monkeypatch)
+    with pytest.raises(_BarrierError):
+        PlaywrightFetcher(proxy="http://user:pass@gate.example.com:7000")
+
+
+def test_fetcher_proxy_threaded_to_chromium_launch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Constructing with a proxy must pass the parsed dict to chromium.launch."""
+    import playwright.sync_api as pw_sync  # noqa: PLC0415 - test-only
+
+    recorded_launch_kwargs: list[dict[str, object]] = []
+
+    class _FakeContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def set_default_navigation_timeout(self, _ms: int) -> None:
+            return None
+
+        def set_default_timeout(self, _ms: int) -> None:
+            return None
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def launch(self, **kwargs: object) -> _FakeBrowser:
+            recorded_launch_kwargs.append(kwargs)
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FakeChromium()
+
+        def stop(self) -> None:
+            return None
+
+    class _FakeRunner:
+        def start(self) -> _FakePlaywright:
+            return _FakePlaywright()
+
+    monkeypatch.setattr(pw_sync, "sync_playwright", lambda: _FakeRunner())
+    monkeypatch.setattr(
+        PlaywrightFetcher,
+        "_discover_default_user_agent",
+        lambda _self: "Mozilla/5.0 (FakeUA)",
+    )
+
+    fetcher = PlaywrightFetcher(proxy="http://u:p@gate.example.com:7000")
+    try:
+        assert len(recorded_launch_kwargs) == 1
+        proxy_arg = recorded_launch_kwargs[0].get("proxy")
+        assert isinstance(proxy_arg, dict)
+        assert proxy_arg["server"] == "http://gate.example.com:7000"
+        assert proxy_arg["username"] == "u"
+        assert proxy_arg["password"] == "p"
+    finally:
+        fetcher.close()
+
+
+def test_fetcher_proxy_credentials_not_in_logs(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The startup log line must NOT contain proxy credentials."""
+    import playwright.sync_api as pw_sync  # noqa: PLC0415 - test-only
+
+    class _FakeContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def set_default_navigation_timeout(self, _ms: int) -> None:
+            return None
+
+        def set_default_timeout(self, _ms: int) -> None:
+            return None
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def launch(self, **_kwargs: object) -> _FakeBrowser:
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FakeChromium()
+
+        def stop(self) -> None:
+            return None
+
+    class _FakeRunner:
+        def start(self) -> _FakePlaywright:
+            return _FakePlaywright()
+
+    monkeypatch.setattr(pw_sync, "sync_playwright", lambda: _FakeRunner())
+    monkeypatch.setattr(
+        PlaywrightFetcher,
+        "_discover_default_user_agent",
+        lambda _self: "Mozilla/5.0 (FakeUA)",
+    )
+
+    caplog.set_level("INFO", logger="car_lense_engine.crawler.core.browser")
+    fetcher = PlaywrightFetcher(
+        proxy="http://supersecretuser:supersecretpass@gate.example.com:7000"
+    )
+    try:
+        messages = " ".join(r.getMessage() for r in caplog.records)
+        assert "supersecretuser" not in messages
+        assert "supersecretpass" not in messages
+        # But the masked host:port should appear.
+        assert "gate.example.com:7000" in messages
+    finally:
+        fetcher.close()
+
+
 def test_wait_until_literal_values() -> None:
     """The WaitUntil Literal must enumerate exactly the three Playwright values."""
     assert browser_mod._WAIT_UNTIL_VALUES == (

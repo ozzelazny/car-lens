@@ -554,6 +554,208 @@ def test_cli_selector_timeout_ms_must_be_positive(
     assert "--selector-timeout-ms" in err
 
 
+def test_cli_help_lists_proxy_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """The --proxy flag must appear in --help output with its env-var fallback note."""
+    with pytest.raises(SystemExit):
+        crawl_cli.main(["--help"])
+    out = capsys.readouterr().out
+    assert "--proxy" in out
+    assert "PROXY_URL" in out
+
+
+def test_cli_proxy_default_is_none(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without --proxy and without PROXY_URL the factory receives proxy=None."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["proxy"] is None
+
+
+def test_cli_proxy_flag_threaded_to_fetcher(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--proxy URL must reach the factory via the proxy kwarg."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--proxy",
+            "http://u:p@h:8080",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["proxy"] == "http://u:p@h:8080"
+
+
+def test_cli_proxy_env_fallback(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When --proxy is absent, the PROXY_URL env var is used."""
+    open_db(db_path).close()
+    monkeypatch.setenv("PROXY_URL", "http://envuser:envpass@envhost:9000")
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["proxy"] == "http://envuser:envpass@envhost:9000"
+
+
+def test_cli_proxy_flag_overrides_env(db_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If both --proxy and PROXY_URL are set, the flag wins."""
+    open_db(db_path).close()
+    monkeypatch.setenv("PROXY_URL", "http://envuser:envpass@envhost:9000")
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--proxy",
+            "http://flaguser:flagpass@flaghost:7000",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["proxy"] == "http://flaguser:flagpass@flaghost:7000"
+
+
+def test_cli_proxy_invalid_url_rejected(
+    db_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--proxy notaurl → exit code 2 with a clear error."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--proxy",
+                "notaurl",
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--proxy" in err
+
+
+def test_cli_proxy_invalid_env_rejected(
+    db_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bad PROXY_URL env var fails fast with exit code 2."""
+    open_db(db_path).close()
+    monkeypatch.setenv("PROXY_URL", "ftp://host:21")
+    with pytest.raises(SystemExit) as exc:
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--proxy" in err
+
+
+def test_cli_proxy_not_logged_with_credentials(
+    db_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proxy URL credentials must NOT appear in CLI log output."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    caplog.set_level("INFO", logger="car_lense_engine.crawler.core.cli")
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--proxy",
+            "http://supersecretuser:supersecretpass@gate.example.com:7000",
+        ],
+        fetcher_factory=_fake_factory,
+    )
+    assert rc == 0
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "supersecretuser" not in messages
+    assert "supersecretpass" not in messages
+    # The masked host:port should appear in startup logs.
+    assert "gate.example.com:7000" in messages
+
+
 def test_cli_filter_by_source_processes_only_matching_items(
     db_path: Path,
 ) -> None:

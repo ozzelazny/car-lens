@@ -22,6 +22,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 from .fetcher import FetchedPage, FetchError
+from .proxy import mask_proxy_url, parse_proxy_url
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from playwright.sync_api import (
@@ -87,6 +88,7 @@ class PlaywrightFetcher:
         viewport: dict[str, int] | None = None,
         locale: str = DEFAULT_LOCALE,
         timezone_id: str = DEFAULT_TIMEZONE,
+        proxy: str | None = None,
     ) -> None:
         # Validate parameters BEFORE launching Chromium so structural tests can
         # exercise validation without a Playwright install. The lazy-import
@@ -126,6 +128,13 @@ class PlaywrightFetcher:
                     )
                 validated_selectors[source] = selector
 
+        # Validate (and parse) the proxy URL BEFORE the lazy Playwright import
+        # so misconfiguration fails fast without launching Chromium. The proxy
+        # dict is held until the chromium.launch call below.
+        proxy_dict: dict[str, str] | None = None
+        if proxy is not None:
+            proxy_dict = parse_proxy_url(proxy)
+
         self._headless = headless
         self._ua_suffix = ua_suffix
         self._wait_until: WaitUntil = wait_until
@@ -136,6 +145,12 @@ class PlaywrightFetcher:
         self._viewport = dict(viewport) if viewport is not None else dict(DEFAULT_VIEWPORT)
         self._locale = locale
         self._timezone_id = timezone_id
+        # We do NOT store the raw proxy URL on the instance — only the parsed
+        # dict is needed for the browser launch, and stashing the original URL
+        # (credentials and all) widens the leak surface for no benefit.
+        self._proxy_configured: bool = proxy_dict is not None
+        # Mask the URL for the startup log — credentials must never appear.
+        self._proxy_log_repr: str | None = mask_proxy_url(proxy) if proxy is not None else None
 
         # Lazy import to keep unit tests free of a Playwright requirement.
         from playwright.sync_api import sync_playwright  # noqa: PLC0415 - intentional lazy import
@@ -146,10 +161,18 @@ class PlaywrightFetcher:
         # ``navigator.webdriver`` from being a clear ``true`` and removes the
         # ``Chrome-AutomationControlled`` infobar signal that Cloudflare and
         # similar gates fingerprint on.
-        self._browser: Browser = self._pw.chromium.launch(
-            headless=self._headless,
-            args=list(_CHROMIUM_LAUNCH_ARGS),
-        )
+        #
+        # When a proxy is configured, attach it at the browser level (simpler
+        # than per-context). Playwright accepts the dict shape returned by
+        # :func:`parse_proxy_url`. We cast at the boundary because Playwright
+        # types the kwarg as a TypedDict.
+        launch_kwargs: dict[str, Any] = {
+            "headless": self._headless,
+            "args": list(_CHROMIUM_LAUNCH_ARGS),
+        }
+        if proxy_dict is not None:
+            launch_kwargs["proxy"] = cast(Any, proxy_dict)
+        self._browser: Browser = self._pw.chromium.launch(**launch_kwargs)
 
         # Get the default UA so we can append our project identifier.
         # If anything goes wrong, fall back to a plain Chromium-like UA.
@@ -196,7 +219,8 @@ class PlaywrightFetcher:
         logger.info(
             "PlaywrightFetcher ready: headless=%s ua_suffix=%s wait_until=%s "
             "settle_ms=%d navigation_timeout_ms=%d selector_timeout_ms=%d "
-            "wait_for_selector_by_source=%s viewport=%s tz=%s stealth=%s",
+            "wait_for_selector_by_source=%s viewport=%s tz=%s stealth=%s "
+            "proxy=%s",
             self._headless,
             self._ua_suffix,
             self._wait_until,
@@ -207,6 +231,7 @@ class PlaywrightFetcher:
             self._viewport,
             self._timezone_id,
             self._stealth_applied,
+            self._proxy_log_repr if self._proxy_configured else "<none>",
         )
 
     # ------------------------------------------------------------- public API
