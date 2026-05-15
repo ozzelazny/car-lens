@@ -160,7 +160,9 @@ def test_parse_listing_missing_jsonld_returns_notes() -> None:
 
 
 def test_parse_listing_falls_back_to_hints_for_missing_make_model() -> None:
-    """When JSON-LD lacks make/model, the queue hints should fill them in."""
+    """When JSON-LD lacks make/model AND the ``name`` field doesn't yield a
+    known make (Shelby is not in ``MAKE_POPULARITY``), the queue hints
+    should fill them in."""
     html = """
     <html><head>
       <script type="application/ld+json">
@@ -185,6 +187,183 @@ def test_parse_listing_falls_back_to_hints_for_missing_make_model() -> None:
     assert result.new_listing.year == 1965
     assert result.new_listing.make == "Shelby"
     assert result.new_listing.model == "Cobra"
+
+
+# ---------- name-field make/model heuristic --------------------------------
+
+
+def test_parse_listing_extracts_make_model_from_name_when_jsonld_null() -> None:
+    """JSON-LD has ``name`` but no ``brand``/``manufacturer``/``model``; the
+    parser should derive make+model from the name string and ignore the
+    fact that hints are empty."""
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@type": "Product",
+       "name": "1991 Honda CRX Si",
+       "brand": null,
+       "manufacturer": null,
+       "model": null,
+       "image": []}
+      </script>
+    </head><body></body></html>
+    """
+    parser = BringATrailerParser()
+    result = parser.parse(
+        html=html,
+        url="https://bringatrailer.com/listing/1991-honda-crx-si-9/",
+        kind="listing",
+        hints={},
+    )
+
+    assert result.new_listing is not None
+    listing = result.new_listing
+    assert listing.year == 1991
+    assert listing.make == "Honda"
+    # No boundary tokens after the make → both "CRX" and "Si" are pulled
+    # in, title-cased per-token. Lock in the implemented behaviour.
+    assert listing.model == "Crx Si"
+
+
+def test_parse_listing_explicit_brand_wins_over_name_parse() -> None:
+    """If JSON-LD has explicit ``brand`` AND a parseable ``name``, the
+    explicit field wins — name-parsing must not override it."""
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@type": "Product",
+       "name": "1991 Honda CRX",
+       "brand": {"name": "Porsche"},
+       "model": {"name": "911"},
+       "image": []}
+      </script>
+    </head><body></body></html>
+    """
+    parser = BringATrailerParser()
+    result = parser.parse(
+        html=html,
+        url="https://bringatrailer.com/listing/1991-honda-crx-confusing/",
+        kind="listing",
+        hints={},
+    )
+
+    assert result.new_listing is not None
+    # Explicit JSON-LD wins; we do NOT fall through to the name-parser.
+    assert result.new_listing.make == "Porsche"
+    assert result.new_listing.model == "911"
+
+
+def test_parse_listing_hints_used_only_when_name_parse_fails() -> None:
+    """``name`` references an unknown make → name-parse returns (None,None)
+    → parser falls back to queue hints for make/model."""
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@type": "Product",
+       "name": "1991 Someunknownmake CRX",
+       "brand": null,
+       "manufacturer": null,
+       "model": null,
+       "image": []}
+      </script>
+    </head><body></body></html>
+    """
+    parser = BringATrailerParser()
+    hints: dict[str, str | int | None] = {
+        "target_year": 1991,
+        "target_make": "Honda",
+        "target_model": "Civic",
+    }
+    result = parser.parse(
+        html=html,
+        url="https://bringatrailer.com/listing/1991-mystery-crx/",
+        kind="listing",
+        hints=hints,
+    )
+
+    assert result.new_listing is not None
+    assert result.new_listing.year == 1991
+    assert result.new_listing.make == "Honda"
+    assert result.new_listing.model == "Civic"
+
+
+def test_parse_listing_prefix_words_before_year_are_skipped() -> None:
+    """BaT names sometimes lead with editorial copy ("No Reserve:",
+    "Original-Owner") before the year. The parser must walk past those
+    to find the year, then look for the make."""
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@type": "Product",
+       "name": "No Reserve: Original-Owner 1986 Honda Civic Si",
+       "brand": null,
+       "manufacturer": null,
+       "model": null,
+       "image": []}
+      </script>
+    </head><body></body></html>
+    """
+    parser = BringATrailerParser()
+    result = parser.parse(
+        html=html,
+        url="https://bringatrailer.com/listing/1986-honda-civic-si-22/",
+        kind="listing",
+        hints={},
+    )
+
+    assert result.new_listing is not None
+    listing = result.new_listing
+    assert listing.year == 1986
+    assert listing.make == "Honda"
+    assert listing.model == "Civic Si"
+
+
+def test_parse_listing_two_word_make_in_name() -> None:
+    """Two-word makes ("Land Rover") must be matched as a single unit
+    before the parser starts taking model tokens."""
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {"@type": "Product",
+       "name": "2018 Land Rover Defender",
+       "brand": null,
+       "manufacturer": null,
+       "model": null,
+       "image": []}
+      </script>
+    </head><body></body></html>
+    """
+    parser = BringATrailerParser()
+    result = parser.parse(
+        html=html,
+        url="https://bringatrailer.com/listing/2018-land-rover-defender-1/",
+        kind="listing",
+        hints={},
+    )
+
+    assert result.new_listing is not None
+    listing = result.new_listing
+    assert listing.year == 2018
+    assert listing.make == "Land Rover"
+    assert listing.model == "Defender"
+
+
+def test_parse_name_make_model_unit_skips_prefix_and_finds_year() -> None:
+    """Direct unit test on the helper — confirms the (make, model) tuple
+    shape without going through the full ``_parse_listing`` flow."""
+    parser = BringATrailerParser()
+    make, model = parser._parse_name_make_model("No Reserve: Original-Owner 1986 Honda Civic Si")
+    assert make == "Honda"
+    assert model == "Civic Si"
+
+
+def test_parse_name_make_model_unit_empty_or_unknown() -> None:
+    """Empty / non-matching names return (None, None)."""
+    parser = BringATrailerParser()
+    assert parser._parse_name_make_model(None) == (None, None)
+    assert parser._parse_name_make_model("") == (None, None)
+    # No year, no known make → nothing to anchor on.
+    assert parser._parse_name_make_model("Some random text 4242") == (None, None)
 
 
 def test_raw_html_sha256_populated(load_fixture: _LoadFixture) -> None:
