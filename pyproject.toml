@@ -32,6 +32,7 @@ dev = [
 [project.scripts]
 car-lense-engine = "car_lense_engine.cli:main"
 build-catalog = "car_lense_engine.catalog.cli:main"
+seed-queue = "car_lense_engine.crawler.seed.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]

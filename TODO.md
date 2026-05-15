@@ -11,7 +11,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 - [x] **1.1** Project scaffold (pyproject.toml, src/ layout, .gitignore, ruff config, pytest config)
 - [x] **1.2** SQLite schema + DB access layer (listings, images, crawl_queue, dedupe)
 - [x] **1.3** NHTSA vPIC catalog builder — pull canonical (year, make, model) list, cache locally
-- [ ] **1.4** Search-query generator — produce per-site search URLs for top-N (make, model, year) combos
+- [x] **1.4** Search-query generator — produce per-site search URLs for top-N (make, model, year) combos
 - [ ] **1.5** Crawler core — Playwright + stealth, request queue, retry/backoff, rate-limit, resume-after-restart
 
 ## Phase 2 — Per-site parsers
@@ -49,6 +49,10 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 - [ ] **6.1** `recognize()` Python interface with two backends (cloud-LLM, on-device)
 - [ ] **6.2** CLI for one-shot inference + batch evaluation
+
+## Known follow-ups (non-blocking)
+
+- Catalog Title Case loses canonical capitalization for compound names: `"MCLAREN"` → `"Mclaren"`, not `"McLaren"`; same for `"BMW"` (becomes `"Bmw"`). Acceptable for taxonomy + matching, but the app's display layer will need a canonical-name override table eventually.
 
 ## Status legend
 
