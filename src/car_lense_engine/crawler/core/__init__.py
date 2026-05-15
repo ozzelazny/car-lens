@@ -16,6 +16,7 @@ from .fetcher import FetchedPage, Fetcher, FetchError
 from .politeness import PolicyConfig, is_off_peak, jittered_delay, sleep_until_off_peak
 from .registry import ParserRegistry
 from .runner import RunSummary, run_crawler
+from .sitemap import SitemapWalker
 from .worker import Worker, WorkerStats
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "ParserRegistry",
     "PolicyConfig",
     "RunSummary",
+    "SitemapWalker",
     "Worker",
     "WorkerStats",
     "is_off_peak",

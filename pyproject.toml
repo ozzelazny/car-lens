@@ -9,6 +9,7 @@ description = "Offline data + training pipeline for the Car Lense vehicle-recogn
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
+    "defusedxml>=0.7",
     "lxml>=5.2",
     "playwright>=1.45",
     "playwright-stealth>=2.0,<3",

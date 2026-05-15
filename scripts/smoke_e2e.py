@@ -5,14 +5,18 @@ This script:
 1. Opens a fresh SQLite DB at ``db/smoke.sqlite`` (delete any prior smoke DB).
 2. Builds a :class:`ParserRegistry` and registers all 6 production parsers.
 3. Seeds exactly one canonical search URL per site (6 URLs total, hardcoded).
-4. Runs :func:`run_crawler` with conservative pacing and a small ``max_items``
-   cap so the run completes in a few minutes.
-5. After the run, prints a structured per-site report to stdout summarising
+4. Optionally walks AutoTrader + Cars & Bids sitemaps and enqueues a small
+   subset of listing URLs directly (controlled by ``--include-sitemap``).
+   Both sites are blocked at their search surfaces but expose machine-
+   readable sitemap XML; this is the only realistic discovery path.
+5. Runs :func:`run_crawler` with conservative pacing and a ``max_items`` cap
+   sized so a single high-volume source can't starve the rest.
+6. After the run, prints a structured per-site report to stdout summarising
    what was fetched, parsed, enqueued, and what failed.
 
 Run with::
 
-    python scripts/smoke_e2e.py
+    python scripts/smoke_e2e.py [--include-sitemap]
 
 This is a personal-research crawl. Respect Cloudflare/rate limits — if a site
 blocks, document and move on; do NOT attempt to defeat the block.
@@ -20,6 +24,7 @@ blocks, document and move on; do NOT attempt to defeat the block.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -38,6 +43,7 @@ from car_lense_engine.crawler.core.politeness import PolicyConfig  # noqa: E402
 from car_lense_engine.crawler.core.registry import ParserRegistry  # noqa: E402
 from car_lense_engine.crawler.core.routing import MultiFetcher  # noqa: E402
 from car_lense_engine.crawler.core.runner import run_crawler  # noqa: E402
+from car_lense_engine.crawler.core.sitemap import SitemapWalker  # noqa: E402
 from car_lense_engine.crawler.parsers import (  # noqa: E402
     AutoTraderParser,
     BringATrailerParser,
@@ -45,6 +51,9 @@ from car_lense_engine.crawler.parsers import (  # noqa: E402
     CarsComParser,
     CraigslistParser,
     HemmingsParser,
+)
+from car_lense_engine.crawler.seed.sitemap_seed import (  # noqa: E402
+    seed_queue_from_sitemap,
 )
 from car_lense_engine.db import open_db, queue  # noqa: E402
 
@@ -72,7 +81,12 @@ SEED_URLS: list[tuple[str, str]] = [
     ),
     (
         "hemmings",
-        "https://www.hemmings.com/classifieds/cars-for-sale?Make=honda&Model=civic",
+        # Slug-style path (matches what ``urls.hemmings`` now produces and
+        # what the real-HTML fixture was saved from). The query-param form
+        # ``?Make=honda&Model=civic`` was previously used here but it
+        # redirects to a bare category landing page that the rewritten
+        # parser does not recognise (run #4 root-caused this mismatch).
+        "https://www.hemmings.com/classifieds/cars-for-sale/honda/civic",
     ),
     (
         "carsandbids",
@@ -292,7 +306,33 @@ def _print_report(conn: object, summary: object, elapsed: float) -> None:
         print()
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse the smoke-harness command-line flags."""
+    parser = argparse.ArgumentParser(
+        prog="smoke_e2e",
+        description="End-to-end smoke test for the Car Lense crawler.",
+    )
+    parser.add_argument(
+        "--include-sitemap",
+        action="store_true",
+        help=(
+            "Also walk the AutoTrader and Cars & Bids sitemaps and enqueue "
+            "5 listing URLs each as kind='listing' rows before running the "
+            "crawler. These sites' search surfaces are unreachable so the "
+            "sitemap is the only way to test their end-to-end pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--sitemap-per-source",
+        type=int,
+        default=5,
+        help="Number of listing URLs to enqueue per sitemap source (default: 5).",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
     _setup_logging()
     log = logging.getLogger("smoke_e2e")
 
@@ -306,6 +346,32 @@ def main() -> int:
         log.info("registered parsers: %s", registry.sources())
 
         _seed_queue(conn, SEED_URLS)
+
+        # Optional: enqueue a small subset of sitemap-discovered listings for
+        # AutoTrader + Cars & Bids. Both sites' search surfaces are blocked
+        # (Akamai / Cloudflare) but the sitemap XML is reachable via curl_cffi.
+        # This is the new validation surface introduced for run #5.
+        if args.include_sitemap:
+            sitemap_fetcher = CurlCffiFetcher()
+            try:
+                walker = SitemapWalker(fetcher=sitemap_fetcher)
+                for source in ("autotrader", "carsandbids"):
+                    sm_stats = seed_queue_from_sitemap(
+                        conn,
+                        source=source,
+                        walker=walker,
+                        max_listings=args.sitemap_per_source,
+                    )
+                    log.info(
+                        "sitemap-seed[%s]: walked=%d matched=%d inserted=%d",
+                        source,
+                        sm_stats.walked,
+                        sm_stats.matched,
+                        sm_stats.inserted,
+                    )
+            finally:
+                sitemap_fetcher.close()
+
         q_stats = queue.stats(conn)
         log.info(
             "seeded queue: pending=%d in_progress=%d done=%d failed=%d dead=%d",
@@ -369,7 +435,13 @@ def main() -> int:
                 fetcher=fetcher,
                 registry=registry,
                 policy=policy,
-                max_items=20,
+                # max_items=60 (was 20). BaT alone yields ~28 listing URLs
+                # off one search page; cars.com adds ~19 more once curl_cffi
+                # clears the Cloudflare gate. The previous 20-item cap was
+                # entirely consumed by BaT before any other source's
+                # listing parser ran. 60 gives every site headroom to be
+                # exercised at least once per smoke run.
+                max_items=60,
             )
         finally:
             fetcher.close()
