@@ -989,3 +989,176 @@ In rough priority order:
   4; covers the SitemapWalker, the per-site sitemap seeders,
   the AT URL filter for both slug-embedded and slash-separated
   IDs, and the harness's `--include-sitemap` integration).
+
+## AT + C&B sitemap diagnostic — 2026-05-15
+
+Targeted follow-up after smoke run #5 flagged AutoTrader walking
+10,000 URLs with 0 filter matches and Cars & Bids' sitemap
+endpoint returning non-XML. The diagnostic lives at
+`scripts/diag_sitemap_at_cab.py` and is reproducible with
+`python scripts/diag_sitemap_at_cab.py`. Politeness:
+`min_delay_seconds=3.0`, ~10 fetches total across both
+diagnostics.
+
+### A) AutoTrader sitemap content — 50-URL sample
+
+Walked the AT root sitemap (`https://www.autotrader.com/sitemap.xml`)
+with `CurlCffiFetcher(impersonate="chrome131")`, capping the walker
+at 50 URLs. Category counts (after manual classifier tuning to
+recognise body-style and make leaf paths):
+
+| category          | count |
+|-------------------|-------|
+| static_category   | 33    |
+| other             | 14    |
+| article_editorial | 2     |
+| dealer            | 1     |
+| **vehicle_listing** | **0** |
+
+All 50 URLs are static taxonomy / marketing pages: site root,
+`/cars-for-sale`, `/certified-cars`, `/sell-my-car`,
+`/about/index`, `/help/sitemap`, calculator tools, body-style
+landing pages (`/luxury`, `/coupe`, `/convertible`, `/sedan`,
+`/suv-crossover`, ...), and make landing pages (`/acura`,
+`/audi`, `/bentley`, `/bmw`, ... — alphabetically through
+`/fisker`). **None of the 50 are `/cars-for-sale/vehicledetails/...`
+or `/cars-for-sale/vehicle/...` URLs.**
+
+A direct fetch of the root sitemap revealed six sub-sitemap
+children:
+
+```
+https://www.autotrader.com/sitemap_main.xml
+https://www.autotrader.com/sitemap_makes.xml
+https://www.autotrader.com/sitemap_dlr.xml.gz          (failed XML parse)
+https://www.autotrader.com/sitemap-srp-geo-main.xml    (300 KB, geo search-result pages)
+https://www.autotrader.com/sitemap-sell-car.xml
+https://www.autotrader.com/marketplace/sitemap.xml     (sitemap index)
+```
+
+The `/marketplace/sitemap.xml` index in turn points to
+`https://www.autotrader.com/marketplace/sitemaps/inventory.xml`,
+which **is** a 39 MB urlset of actual vehicle inventory — but the
+URL shape is `https://www.autotrader.com/cars-for-sale/vehicle/<id>`
+(numeric id, no slug, no `vehicledetails` segment). Example:
+
+```
+https://www.autotrader.com/cars-for-sale/vehicle/780510196
+```
+
+**Headline finding for AT**: vehicle data IS reachable via the
+sitemap tree, but two pieces are needed for end-to-end:
+
+1. The walker reaches `marketplace/sitemap.xml` only after
+   exhausting the breadth-first walk of the other 5 root children;
+   in smoke run #5 it hit `max_urls=10000` on `sitemap-srp-geo-main.xml`
+   (which alone contains ~thousands of geo SRP URLs like
+   `https://www.autotrader.com/cars-for-sale/aberdeen-md`) before
+   reaching the marketplace branch. To get vehicle URLs, the
+   walker either needs a higher `max_urls` cap or the seeder
+   needs to enter the marketplace sub-sitemap directly.
+2. The current AT listing-URL filter
+   (`is_autotrader_listing` in `crawler/seed/sitemap_seed.py`)
+   requires the substring `/cars-for-sale/vehicledetails/` in the
+   path, but AT's real inventory URLs are
+   `/cars-for-sale/vehicle/<id>` — **the filter doesn't match
+   any real AT inventory URL**. This is why smoke run #5 reported
+   `walked=10000 matched=0` even where the geo / make sub-sitemaps
+   yielded real (non-listing) AT URLs.
+
+### B) Cars & Bids sitemap endpoint
+
+Probed four URLs with `CurlCffiFetcher(impersonate="chrome131")`:
+
+| URL                                                          | status | length | body kind | usable? |
+|--------------------------------------------------------------|--------|--------|-----------|---------|
+| `https://carsandbids.com/cab-sitemap/xml`                    | 200    | 13 KB  | html (SPA shell) | **no** |
+| `https://carsandbids.com/cab-sitemap/xml_sitemap.xml`        | 200    | 912 B  | **xml (sitemapindex)** | **yes** |
+| `https://carsandbids.com/sitemap.xml`                        | 200    | 1.1 KB | xml (urlset, 4 static pages) | partial |
+| `https://carsandbids.com/robots.txt`                         | 200    | 213 B  | robots_txt | meta |
+
+**Headline finding for C&B**: the URL we were using
+(`/cab-sitemap/xml`) is NOT the sitemap; it's the React SPA shell
+served at any unknown path. The robots.txt advertises the real
+sitemap as
+`https://carsandbids.com/cab-sitemap/xml_sitemap.xml` (note
+`_sitemap.xml` suffix), which is a well-formed sitemap index:
+
+```xml
+<sitemapindex>
+  <sitemap>
+    <loc>https://carsandbids.com/cab-sitemap/auctions.xml</loc>
+    <lastmod>2026-05-15T04:00:02.395129+00:00</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>https://carsandbids.com/cab-sitemap/auction-videos.xml</loc>
+    ...
+  </sitemap>
+  <sitemap>
+    <loc>https://carsandbids.com/cab-sitemap/makes.xml</loc>
+    ...
+  </sitemap>
+  ...
+</sitemapindex>
+```
+
+`auctions.xml` is the relevant child for individual auction
+listings. **Cars & Bids IS reachable via sitemap walking — we
+just had the wrong root URL in `SITEMAP_ROOTS`.**
+
+### Recommendation — are AT + C&B accepted gaps?
+
+**Neither is a gap.** Both sites are reachable for vehicle data
+with what we have:
+
+- **AutoTrader**: the walker reaches the right sub-sitemap
+  (`marketplace/sitemaps/inventory.xml`) but the breadth-first
+  traversal exhausts `max_urls=10000` on the geo SRP branch
+  first, and the AT listing-URL filter expects the wrong path
+  segment (`vehicledetails/` vs the real `vehicle/`). Two
+  follow-up tasks (out of scope for this diagnostic): point
+  the AT seeder at the marketplace sub-sitemap directly, and
+  update `is_autotrader_listing` to accept the
+  `/cars-for-sale/vehicle/<6+digit-id>` shape.
+- **Cars & Bids**: switch `SITEMAP_ROOTS["carsandbids"]` from
+  `"https://carsandbids.com/cab-sitemap/xml"` to
+  `"https://carsandbids.com/cab-sitemap/xml_sitemap.xml"`.
+  One-character-ish fix.
+
+### Smoke harness — per-source max_items budget
+
+`scripts/smoke_e2e.py` now invokes `run_crawler` once per
+source with a per-source budget:
+
+```python
+PER_SOURCE_MAX_ITEMS = {
+    "bat": 15,
+    "craigslist": 15,
+    "cars_com": 15,
+    "hemmings": 10,
+    "autotrader": 5,
+    "carsandbids": 5,
+}
+```
+
+`run_crawler` already accepted a `source` filter that scoped
+`run_one` to a single source, so the change is just the
+harness loop: seed once, sitemap-seed once, then iterate
+sources and call `run_crawler(..., source=source,
+max_items=PER_SOURCE_MAX_ITEMS[source])` for each. The
+per-call `RunSummary` objects are aggregated into a single
+`WorkerStats`-shaped combined summary for the final report.
+
+This solves the BaT-and-cars.com-starve-everyone-else
+problem reported in runs #2 - #5. Hemmings, AutoTrader, and
+Cars & Bids will now each get their own listing-fetch
+budget independent of the high-volume sites' queues.
+
+### Pytest / lint
+
+- `ruff check .` — All checks passed.
+- `pytest` — `392 passed in 15.89s` (no regressions; the
+  diagnostic script and the per-source harness change are
+  not covered by unit tests — both are tools, not library
+  code, and unit-testing live-network probes is out of
+  scope).

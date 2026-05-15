@@ -42,8 +42,9 @@ from car_lense_engine.crawler.core.curlcffi_fetcher import CurlCffiFetcher  # no
 from car_lense_engine.crawler.core.politeness import PolicyConfig  # noqa: E402
 from car_lense_engine.crawler.core.registry import ParserRegistry  # noqa: E402
 from car_lense_engine.crawler.core.routing import MultiFetcher  # noqa: E402
-from car_lense_engine.crawler.core.runner import run_crawler  # noqa: E402
+from car_lense_engine.crawler.core.runner import RunSummary, run_crawler  # noqa: E402
 from car_lense_engine.crawler.core.sitemap import SitemapWalker  # noqa: E402
+from car_lense_engine.crawler.core.worker import WorkerStats  # noqa: E402
 from car_lense_engine.crawler.parsers import (  # noqa: E402
     AutoTraderParser,
     BringATrailerParser,
@@ -108,6 +109,24 @@ SOURCES: tuple[str, ...] = (
     "hemmings",
     "carsandbids",
 )
+
+# Per-source listing-fetch budget. The smoke harness invokes ``run_crawler``
+# once per source so a single high-volume site can no longer starve the rest.
+# Smoke runs #2-#5 showed BaT (~28 listings off one search page) and cars.com
+# (~19) jointly consuming every iteration of the previous global
+# ``max_items=60`` cap, leaving Hemmings and the sitemap-seeded sources
+# (AutoTrader, Cars & Bids) with zero listing-parser exposure. Per-source
+# budgets cap each site independently. Total worst case: 65 items across
+# six sources; in practice the queue runs short of that for several sources
+# and exits via ``queue_empty`` for them.
+PER_SOURCE_MAX_ITEMS: dict[str, int] = {
+    "bat": 15,
+    "craigslist": 15,
+    "cars_com": 15,
+    "hemmings": 10,
+    "autotrader": 5,
+    "carsandbids": 5,
+}
 
 # AutoTrader is a JS-rendered SPA; smoke run 2 (2026-05-15) confirmed that
 # ``settle_ms=5000`` alone is not enough — the listing grid hadn't hydrated by
@@ -431,25 +450,63 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         started = time.monotonic()
+        # Per-source runs: invoke ``run_crawler`` once per registered source
+        # with its own ``max_items`` budget so a single high-volume site
+        # (BaT, cars.com) can no longer starve the rest. ``run_crawler``
+        # already supports a ``source`` filter that scopes ``run_one`` to
+        # rows matching that source, so the loop is structurally simple.
+        # Aggregate the per-source RunSummary into a single combined object
+        # for the report printer.
+        agg_stats = WorkerStats()
+        last_exit_reason: str = "queue_empty"
         try:
-            summary = run_crawler(
-                conn=conn,
-                fetcher=fetcher,
-                registry=registry,
-                policy=policy,
-                # max_items=60 (was 20). BaT alone yields ~28 listing URLs
-                # off one search page; cars.com adds ~19 more once curl_cffi
-                # clears the Cloudflare gate. The previous 20-item cap was
-                # entirely consumed by BaT before any other source's
-                # listing parser ran. 60 gives every site headroom to be
-                # exercised at least once per smoke run.
-                max_items=60,
-            )
+            for source in SOURCES:
+                budget = PER_SOURCE_MAX_ITEMS.get(source, 5)
+                log.info(
+                    "running crawler for source=%s with max_items=%d",
+                    source,
+                    budget,
+                )
+                summary: RunSummary = run_crawler(
+                    conn=conn,
+                    fetcher=fetcher,
+                    registry=registry,
+                    policy=policy,
+                    source=source,
+                    max_items=budget,
+                )
+                # Aggregate counters across sources.
+                agg_stats = WorkerStats(
+                    requests_total=agg_stats.requests_total + summary.stats.requests_total,
+                    requests_succeeded=(
+                        agg_stats.requests_succeeded + summary.stats.requests_succeeded
+                    ),
+                    requests_failed=agg_stats.requests_failed + summary.stats.requests_failed,
+                    listings_inserted=(
+                        agg_stats.listings_inserted + summary.stats.listings_inserted
+                    ),
+                    urls_enqueued=agg_stats.urls_enqueued + summary.stats.urls_enqueued,
+                )
+                # Track the last non-trivial exit reason for the printed
+                # report. ``max_items_reached`` for any source dominates over
+                # ``queue_empty``.
+                if summary.exit_reason == "max_items_reached":
+                    last_exit_reason = "max_items_reached"
+                elif (
+                    summary.exit_reason != "queue_empty"
+                    and last_exit_reason == "queue_empty"
+                ):
+                    last_exit_reason = summary.exit_reason
         finally:
             fetcher.close()
         elapsed = time.monotonic() - started
 
-        _print_report(conn, summary, elapsed=elapsed)
+        combined_summary = RunSummary(
+            stats=agg_stats,
+            exit_reason=last_exit_reason,
+            elapsed_seconds=elapsed,
+        )
+        _print_report(conn, combined_summary, elapsed=elapsed)
     finally:
         conn.close()
 
