@@ -116,8 +116,23 @@ def test_is_autotrader_listing_rejects_static_pages() -> None:
 
 
 def test_is_carsandbids_listing_accepts_two_segment_auctions_path() -> None:
+    # Short / shareable form: /auctions/<slug>
     assert is_carsandbids_listing("https://carsandbids.com/auctions/2020-honda-civic")
     assert is_carsandbids_listing("https://carsandbids.com/auctions/some-slug/")
+
+
+def test_is_carsandbids_listing_accepts_canonical_sitemap_shape() -> None:
+    """``cab-sitemap/auctions.xml`` emits ``/auctions/<short-id>/<title-slug>``."""
+    assert is_carsandbids_listing(
+        "https://carsandbids.com/auctions/9aQM0NwG/2017-jeep-wrangler-unlimited-sahara-4x4"
+    )
+    assert is_carsandbids_listing(
+        "https://carsandbids.com/auctions/rMealxLL/2015-bentley-continental-gt"
+    )
+    # Trailing slash tolerated.
+    assert is_carsandbids_listing(
+        "https://carsandbids.com/auctions/KdxPO0Rp/2012-mercedes-benz-gl350-bluetec/"
+    )
 
 
 def test_is_carsandbids_listing_rejects_non_listing_paths() -> None:
@@ -126,8 +141,10 @@ def test_is_carsandbids_listing_rejects_non_listing_paths() -> None:
     assert not is_carsandbids_listing("https://carsandbids.com/auctions")
     # Wrong path prefix.
     assert not is_carsandbids_listing("https://carsandbids.com/past-auctions/foo")
-    # Too many segments.
-    assert not is_carsandbids_listing("https://carsandbids.com/auctions/2020-honda-civic/bids")
+    # Sub-page of an auction (one segment too deep).
+    assert not is_carsandbids_listing(
+        "https://carsandbids.com/auctions/9aQM0NwG/2017-jeep-wrangler/bids"
+    )
 
 
 # --------------------------------------------------- seed_queue_from_sitemap
@@ -157,17 +174,26 @@ def test_seed_queue_from_sitemap_autotrader_filter(db: sqlite3.Connection) -> No
 
 
 def test_seed_queue_from_sitemap_carsandbids_filter(db: sqlite3.Connection) -> None:
+    """Mix of short-form, canonical-form, and non-listing URLs.
+
+    URL shapes mirror what ``cab-sitemap/auctions.xml`` actually emits as
+    of 2026-05-15 (canonical ``/auctions/<short-id>/<title-slug>``) plus
+    the short shareable form humans use directly.
+    """
     urls = [
+        # Short / shareable form (one trailing segment).
         "https://carsandbids.com/auctions/1991-honda-crx-si",
+        # Canonical sitemap form (two trailing segments).
+        "https://carsandbids.com/auctions/9aQM0NwG/2017-jeep-wrangler-unlimited-sahara-4x4",
         "https://carsandbids.com/auctions/",  # filtered out
         "https://carsandbids.com/past-auctions/foo",  # filtered out
         "https://carsandbids.com/auctions/2020-honda-civic-type-r",
     ]
     walker = _CannedWalker(urls)
     stats = seed_queue_from_sitemap(db, source="carsandbids", walker=walker)  # type: ignore[arg-type]
-    assert stats.walked == 4
-    assert stats.matched == 2
-    assert stats.inserted == 2
+    assert stats.walked == 5
+    assert stats.matched == 3
+    assert stats.inserted == 3
 
     urls_inserted = sorted(
         row["url"] for row in db.execute("SELECT url FROM crawl_queue").fetchall()
@@ -175,6 +201,7 @@ def test_seed_queue_from_sitemap_carsandbids_filter(db: sqlite3.Connection) -> N
     assert urls_inserted == [
         "https://carsandbids.com/auctions/1991-honda-crx-si",
         "https://carsandbids.com/auctions/2020-honda-civic-type-r",
+        "https://carsandbids.com/auctions/9aQM0NwG/2017-jeep-wrangler-unlimited-sahara-4x4",
     ]
 
 

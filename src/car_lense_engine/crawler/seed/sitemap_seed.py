@@ -43,11 +43,15 @@ SITEMAP_ROOTS: dict[str, str] = {
     # — point the seeder directly at that 39 MB urlset to skip the wasted
     # 6-branch BFS.
     "autotrader": "https://www.autotrader.com/marketplace/sitemaps/inventory.xml",
-    # Cars & Bids' robots.txt advertises the sitemap at
-    # ``/cab-sitemap/xml_sitemap.xml`` (with ``_sitemap.xml`` suffix). The
-    # previously used ``/cab-sitemap/xml`` returned an HTML SPA shell rather
-    # than XML.
-    "carsandbids": "https://carsandbids.com/cab-sitemap/xml_sitemap.xml",
+    # Cars & Bids' robots.txt advertises a sitemap *index* at
+    # ``/cab-sitemap/xml_sitemap.xml`` which points at three child sub-sitemaps
+    # (``auctions.xml``, ``auction-videos.xml``, ``makes.xml``). Smoke run #6
+    # showed the walker's BFS burning its 10K-URL budget on sibling sub-sitemaps
+    # before reaching ``auctions.xml`` and producing 0 matches. Point the seeder
+    # directly at the auctions child urlset (~2 MB, ~9.9K auction URLs in the
+    # expected ``/auctions/<slug>/<title>`` shape) to skip the index BFS — same
+    # pattern used for AutoTrader's inventory.xml above.
+    "carsandbids": "https://carsandbids.com/cab-sitemap/auctions.xml",
 }
 """Root sitemap URL per source identifier.
 
@@ -85,8 +89,18 @@ def is_autotrader_listing(url: str) -> bool:
 def is_carsandbids_listing(url: str) -> bool:
     """Return True if ``url`` is a Cars & Bids individual auction page.
 
-    Auction pages live at ``/auctions/<slug>`` (exactly two path segments,
-    not the bare ``/auctions/`` index).
+    Cars & Bids serves two valid URL shapes for an auction:
+
+    * ``/auctions/<slug>`` — a single segment under ``/auctions/`` (the
+      short / shareable form a human types or links to).
+    * ``/auctions/<short-id>/<title-slug>`` — the canonical form emitted
+      by ``cab-sitemap/auctions.xml`` (e.g.
+      ``/auctions/9aQM0NwG/2017-jeep-wrangler-unlimited-sahara-4x4``).
+      Both segments are listing identifiers, not sub-pages.
+
+    Sub-pages of an auction (``.../bids``, ``.../comments``, etc.) add a
+    third trailing segment and are rejected. The bare ``/auctions/`` and
+    ``/auctions`` indexes are also rejected.
     """
     parsed = urlparse(url)
     path = parsed.path
@@ -95,7 +109,11 @@ def is_carsandbids_listing(url: str) -> bool:
     if path == "/auctions/" or path == "/auctions":
         return False
     segments = [seg for seg in path.strip("/").split("/") if seg]
-    return len(segments) == 2
+    # segments[0] is always "auctions" given the prefix check above. Accept
+    # either one or two trailing segments (1991-honda-crx-si OR
+    # 9aQM0NwG/2017-jeep-wrangler...); reject deeper paths like
+    # /auctions/<slug>/bids.
+    return len(segments) in (2, 3)
 
 
 ListingUrlFilter = Callable[[str], bool]

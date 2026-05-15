@@ -56,6 +56,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 - BaT name-parse doesn't recognize two-word *models* like `"Del Sol"`, `"Type R"`. Two-word-make matching exists (Land Rover, Alfa Romeo) but no symmetric two-word-model logic. A `1997 Honda Del Sol` listing comes out as `model="Del", trim="Sol Si 5-Speed"`. Affects a handful of model families.
 - `parse_proxy_url` still echoes the raw URL in the `"missing scheme"` `ValueError` (e.g. `//user:pass@host:8080` → message contains credentials). Triggered only by schemeless input, which is unusual but possible. The missing-host and missing-port paths were fixed in `b390fa4`; this third path remains as the only residual leak surface.
 - Crawler smoke results are non-deterministic against Cloudflare-protected sites (cars.com observed flipping 200→403 between identical runs). Validation of parser fixes for those sites requires either consistent access via residential proxy OR a fixture-based test against saved HTML snapshots.
+- AutoTrader vehicle-detail pages return an Akamai Bot Manager interstitial (HTTP 200, ~3.7 KB, title "Autotrader - page unavailable", assets under `/akamai-block/...`) when fetched via `CurlCffiFetcher(impersonate="chrome131")`. Sitemap URL discovery still works, but no detail data is extractable without a residential proxy. Fixture preserved at `tests/crawler/parsers/fixtures/real_world/autotrader_detail_curlcffi_chrome131_20260515T231622Z.html`. Reopen for parser work when a proxy pool is provisioned.
 
 ## Status legend
 

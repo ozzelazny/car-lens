@@ -1408,3 +1408,74 @@ and the code paths exercised by every smoke run have been
 hardened against real production HTML across cars.com,
 BaT, Craigslist, Hemmings, and AutoTrader. Remaining
 follow-ups are tracked above and in `TODO.md`.
+
+## AT detail-page Akamai gap — 2026-05-15
+
+After run #6 found 4 / 4 AT detail fetches returning HTTP
+200 but yielding 0 parsed rows, we saved one detail page
+to a fixture for forensic inspection.
+
+- **Fixture**: `tests/crawler/parsers/fixtures/real_world/autotrader_detail_curlcffi_chrome131_20260515T231622Z.html`
+- **Source URL**: `https://www.autotrader.com/cars-for-sale/vehicle/780510778`
+- **Fetcher**: `CurlCffiFetcher(impersonate="chrome131")`
+- **Size**: 3760 bytes (real AT detail pages are hundreds
+  of KB; this is two orders of magnitude smaller)
+
+### What's inside the saved HTML
+
+- `<title>Autotrader - page unavailable</title>` — the
+  literal Akamai block page title.
+- Stylesheet and image asset references under
+  `/akamai-block/block-images/...` — the Akamai Bot
+  Manager block-page asset path.
+- Body copy: *"We're sorry for any inconvenience, but
+  the site is currently unavailable."*
+- `application/ld+json` blocks: **0** (search miss).
+- `__NEXT_DATA__` / `window.__INITIAL_STATE__` blobs:
+  **0**.
+- `og:` meta tags: **0**.
+- `vehicleIdentificationNumber` / `VIN` mentions: **0**.
+
+The page is a hardcoded HTML interstitial served by
+Akamai when their Bot Manager fingerprints the request as
+non-human. The HTTP 200 status code is what made this hard
+to detect upstream: the fetcher and walker both consider
+200 a success, and the parser correctly reports "no Vehicle
+JSON-LD found" because there genuinely isn't any.
+
+### Verdict — accepted gap
+
+This is the same wall as AT search pages (documented in
+`BLOCKS_DIAGNOSTIC.md`). curl_cffi's chrome131 TLS / JA3
+profile clears AT's CDN edge for the sitemap XML and the
+robots stub but not for individual vehicle detail pages,
+which sit behind a stricter Bot Manager policy. No
+realistic bypass exists without a residential proxy
+(MIT / commercial pool) — and even then the policy may
+require browser-rendered behavioral signals.
+
+**Status**: not a parser bug, not a fetcher bug. Closed
+as an accepted v1 gap. Pipeline correctness preserved
+(zero false positives, no garbage rows). Reopen when a
+proxy is provisioned; see `TODO.md` for the follow-up.
+
+## C&B sitemap drill-down — 2026-05-15
+
+Run #6 saw the walker reach `cab-sitemap/xml_sitemap.xml`
+(a sitemap *index*) and walk all 10K of its budget on the
+sibling sub-sitemaps (`auction-videos.xml`, `makes.xml`)
+before getting to `auctions.xml` — yielding 0 matches.
+
+Probed `https://carsandbids.com/cab-sitemap/auctions.xml`
+once via `CurlCffiFetcher(impersonate="chrome131")`:
+
+- HTTP 200, content begins with `<urlset xmlns="...">`.
+- 2 108 887 bytes, **9 925 `<loc>` entries**, all in the
+  expected `/auctions/<slug>/<title>` shape that
+  `is_carsandbids_listing` accepts.
+
+Applied the same drill-down used for AT in commit
+`6d8a471`: `SITEMAP_ROOTS["carsandbids"]` now points
+directly at the `auctions.xml` child urlset, skipping
+the index BFS. Walker / filter / queue logic unchanged.
+Smoke run #7 will validate end-to-end.
