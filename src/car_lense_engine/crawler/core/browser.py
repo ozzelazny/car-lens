@@ -19,7 +19,7 @@ import contextlib
 import logging
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 from .fetcher import FetchedPage, FetchError
 
@@ -33,11 +33,17 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 logger = logging.getLogger(__name__)
 
+WaitUntil = Literal["domcontentloaded", "load", "networkidle"]
+"""Accepted values for ``page.goto(wait_until=...)``."""
+
+_WAIT_UNTIL_VALUES: tuple[str, ...] = get_args(WaitUntil)
+
 DEFAULT_VIEWPORT: dict[str, int] = {"width": 1366, "height": 900}
 DEFAULT_LOCALE: str = "en-US"
 DEFAULT_TIMEZONE: str = "America/New_York"
-DEFAULT_NAV_TIMEOUT_MS: int = 30_000
-DEFAULT_SETTLE_MS: int = 1500
+DEFAULT_NAVIGATION_TIMEOUT_MS: int = 30_000
+DEFAULT_SETTLE_MS: int = 3_000
+DEFAULT_WAIT_UNTIL: WaitUntil = "domcontentloaded"
 
 
 class PlaywrightFetcher:
@@ -53,16 +59,31 @@ class PlaywrightFetcher:
         *,
         headless: bool = True,
         ua_suffix: str = "CarLenseResearch/0.1",
-        nav_timeout_ms: int = DEFAULT_NAV_TIMEOUT_MS,
+        wait_until: WaitUntil = DEFAULT_WAIT_UNTIL,
         settle_ms: int = DEFAULT_SETTLE_MS,
+        navigation_timeout_ms: int = DEFAULT_NAVIGATION_TIMEOUT_MS,
         viewport: dict[str, int] | None = None,
         locale: str = DEFAULT_LOCALE,
         timezone_id: str = DEFAULT_TIMEZONE,
     ) -> None:
+        # Validate parameters BEFORE launching Chromium so structural tests can
+        # exercise validation without a Playwright install. The lazy-import
+        # contract requires that an invalid call raise without touching the
+        # ``playwright`` module.
+        if wait_until not in _WAIT_UNTIL_VALUES:
+            raise ValueError(
+                f"wait_until must be one of {_WAIT_UNTIL_VALUES!r}, got {wait_until!r}"
+            )
+        if settle_ms < 0:
+            raise ValueError(f"settle_ms must be >= 0, got {settle_ms!r}")
+        if navigation_timeout_ms <= 0:
+            raise ValueError(f"navigation_timeout_ms must be > 0, got {navigation_timeout_ms!r}")
+
         self._headless = headless
         self._ua_suffix = ua_suffix
-        self._nav_timeout_ms = nav_timeout_ms
+        self._wait_until: WaitUntil = wait_until
         self._settle_ms = settle_ms
+        self._navigation_timeout_ms = navigation_timeout_ms
         self._viewport = dict(viewport) if viewport is not None else dict(DEFAULT_VIEWPORT)
         self._locale = locale
         self._timezone_id = timezone_id
@@ -83,8 +104,8 @@ class PlaywrightFetcher:
             locale=self._locale,
             timezone_id=self._timezone_id,
         )
-        self._context.set_default_navigation_timeout(self._nav_timeout_ms)
-        self._context.set_default_timeout(self._nav_timeout_ms)
+        self._context.set_default_navigation_timeout(self._navigation_timeout_ms)
+        self._context.set_default_timeout(self._navigation_timeout_ms)
 
         # Apply playwright-stealth patches once at context level.
         stealth_sync: Any | None
@@ -97,9 +118,13 @@ class PlaywrightFetcher:
         self._stealth_sync = stealth_sync
 
         logger.info(
-            "PlaywrightFetcher ready: headless=%s ua_suffix=%s viewport=%s tz=%s",
+            "PlaywrightFetcher ready: headless=%s ua_suffix=%s wait_until=%s "
+            "settle_ms=%d navigation_timeout_ms=%d viewport=%s tz=%s",
             self._headless,
             self._ua_suffix,
+            self._wait_until,
+            self._settle_ms,
+            self._navigation_timeout_ms,
             self._viewport,
             self._timezone_id,
         )
@@ -115,7 +140,11 @@ class PlaywrightFetcher:
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("playwright-stealth patch failed: %r", exc)
         try:
-            response = page.goto(url, wait_until="domcontentloaded")
+            response = page.goto(
+                url,
+                wait_until=self._wait_until,
+                timeout=self._navigation_timeout_ms,
+            )
             page.wait_for_timeout(self._settle_ms)
             if response is None:
                 raise FetchError(f"no response object returned for {url}")

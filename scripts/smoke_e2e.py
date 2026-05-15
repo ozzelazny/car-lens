@@ -298,7 +298,19 @@ def main() -> int:
             off_peak_only=False,
             idle_exit_seconds=10,
         )
-        fetcher = PlaywrightFetcher(headless=True)
+        # The 2026-05-15 smoke run found AutoTrader returning unhydrated 4 KB
+        # shells and Craigslist returning inconsistent (~155 KB vs ~35 KB)
+        # responses with the previous defaults (wait_until="domcontentloaded",
+        # settle_ms=1500, navigation_timeout_ms=30000). Both sites render via
+        # JS, so we bump the wait/timeout for the smoke target list. Stay on
+        # "domcontentloaded" (not "networkidle") to avoid the well-known
+        # networkidle hangs on long-polling trackers.
+        fetcher = PlaywrightFetcher(
+            headless=True,
+            wait_until="domcontentloaded",
+            settle_ms=5000,
+            navigation_timeout_ms=45_000,
+        )
 
         started = time.monotonic()
         try:

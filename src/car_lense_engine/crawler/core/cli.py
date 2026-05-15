@@ -21,13 +21,20 @@ from pathlib import Path
 
 from car_lense_engine.db import open_db, queue
 
-from .browser import PlaywrightFetcher
+from .browser import (
+    DEFAULT_NAVIGATION_TIMEOUT_MS,
+    DEFAULT_SETTLE_MS,
+    DEFAULT_WAIT_UNTIL,
+    PlaywrightFetcher,
+    WaitUntil,
+)
 from .fetcher import Fetcher
 from .politeness import PolicyConfig
 from .registry import ParserRegistry
 from .runner import run_crawler
 
 DEFAULT_DB = Path("db/crawl.sqlite")
+WAIT_UNTIL_CHOICES: tuple[str, ...] = ("domcontentloaded", "load", "networkidle")
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -101,6 +108,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="exit after the queue has been empty this long (default: 60)",
     )
     parser.add_argument(
+        "--wait-until",
+        type=str,
+        choices=WAIT_UNTIL_CHOICES,
+        default=DEFAULT_WAIT_UNTIL,
+        help=(
+            "Playwright page.goto wait_until signal "
+            f"(default: {DEFAULT_WAIT_UNTIL}). Use 'networkidle' for heavy SPAs."
+        ),
+    )
+    parser.add_argument(
+        "--settle-ms",
+        type=int,
+        default=DEFAULT_SETTLE_MS,
+        help=(
+            "milliseconds to wait after navigation for JS to hydrate "
+            f"(default: {DEFAULT_SETTLE_MS})"
+        ),
+    )
+    parser.add_argument(
+        "--navigation-timeout-ms",
+        type=int,
+        default=DEFAULT_NAVIGATION_TIMEOUT_MS,
+        help=(
+            "Playwright navigation timeout in milliseconds "
+            f"(default: {DEFAULT_NAVIGATION_TIMEOUT_MS})"
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -109,9 +144,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _make_fetcher(*, headless: bool) -> Fetcher:
+def _make_fetcher(
+    *,
+    headless: bool,
+    wait_until: WaitUntil = DEFAULT_WAIT_UNTIL,
+    settle_ms: int = DEFAULT_SETTLE_MS,
+    navigation_timeout_ms: int = DEFAULT_NAVIGATION_TIMEOUT_MS,
+) -> Fetcher:
     """Default fetcher factory; overridden in tests via :func:`main` argument."""
-    return PlaywrightFetcher(headless=headless)
+    return PlaywrightFetcher(
+        headless=headless,
+        wait_until=wait_until,
+        settle_ms=settle_ms,
+        navigation_timeout_ms=navigation_timeout_ms,
+    )
 
 
 def main(
@@ -126,10 +172,12 @@ def main(
     argv:
         Command-line arguments (defaults to ``sys.argv[1:]``).
     fetcher_factory:
-        Optional callable ``(headless: bool) -> Fetcher``. Tests inject a fake
-        fetcher here so the CLI can be exercised without Playwright. Typed as
-        ``object`` to keep the public surface unencumbered; the callable is
-        invoked with a single ``headless=`` keyword.
+        Optional callable accepting at least ``headless: bool`` and optionally
+        ``wait_until``, ``settle_ms``, ``navigation_timeout_ms`` keywords. Tests
+        inject a fake fetcher here so the CLI can be exercised without
+        Playwright. Typed as ``object`` to keep the public surface
+        unencumbered; the callable is invoked with all configured fetcher
+        keyword arguments.
     """
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -189,7 +237,12 @@ def main(
         factory = fetcher_factory if fetcher_factory is not None else _make_fetcher
         if not callable(factory):  # pragma: no cover - defensive
             raise TypeError("fetcher_factory must be callable")
-        fetcher: Fetcher = factory(headless=args.headless)
+        fetcher: Fetcher = factory(
+            headless=args.headless,
+            wait_until=args.wait_until,
+            settle_ms=args.settle_ms,
+            navigation_timeout_ms=args.navigation_timeout_ms,
+        )
         try:
             summary = run_crawler(
                 conn=conn,

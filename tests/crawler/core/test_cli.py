@@ -34,6 +34,9 @@ def test_cli_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
         "--min-delay",
         "--max-delay",
         "--idle-exit-seconds",
+        "--wait-until",
+        "--settle-ms",
+        "--navigation-timeout-ms",
     ):
         assert flag in out, f"expected {flag!r} in --help output"
 
@@ -121,8 +124,9 @@ def test_cli_uses_supplied_fetcher_factory(db_path: Path, tmp_path: Path) -> Non
 
     captured: dict[str, object] = {}
 
-    def _factory(*, headless: bool) -> Fetcher:
+    def _factory(*, headless: bool, **kwargs: object) -> Fetcher:
         captured["headless"] = headless
+        captured.update(kwargs)
         captured["fetcher"] = FakeFetcher()
         return captured["fetcher"]  # type: ignore[return-value]
 
@@ -145,6 +149,70 @@ def test_cli_uses_supplied_fetcher_factory(db_path: Path, tmp_path: Path) -> Non
     fetcher = captured["fetcher"]
     assert isinstance(fetcher, FakeFetcher)
     assert fetcher.closed is True
+
+
+def test_cli_passes_wait_until_to_fetcher_factory(db_path: Path) -> None:
+    """--wait-until / --settle-ms / --navigation-timeout-ms must reach the factory."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--wait-until",
+            "networkidle",
+            "--settle-ms",
+            "7500",
+            "--navigation-timeout-ms",
+            "60000",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["wait_until"] == "networkidle"
+    assert captured["settle_ms"] == 7500
+    assert captured["navigation_timeout_ms"] == 60000
+
+
+def test_cli_settle_ms_default_is_3000(db_path: Path) -> None:
+    """The default settle_ms exposed to the factory must be 3000."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["settle_ms"] == 3000
+    assert captured["wait_until"] == "domcontentloaded"
+    assert captured["navigation_timeout_ms"] == 30000
 
 
 def test_cli_filter_by_source_processes_only_matching_items(
