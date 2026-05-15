@@ -12,7 +12,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 - [x] **1.2** SQLite schema + DB access layer (listings, images, crawl_queue, dedupe)
 - [x] **1.3** NHTSA vPIC catalog builder — pull canonical (year, make, model) list, cache locally
 - [x] **1.4** Search-query generator — produce per-site search URLs for top-N (make, model, year) combos
-- [ ] **1.5** Crawler core — Playwright + stealth, request queue, retry/backoff, rate-limit, resume-after-restart
+- [x] **1.5** Crawler core — Playwright + stealth, request queue, retry/backoff, rate-limit, resume-after-restart
 
 ## Phase 2 — Per-site parsers
 
