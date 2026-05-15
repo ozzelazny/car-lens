@@ -38,13 +38,32 @@ WaitUntil = Literal["domcontentloaded", "load", "networkidle"]
 
 _WAIT_UNTIL_VALUES: tuple[str, ...] = get_args(WaitUntil)
 
-DEFAULT_VIEWPORT: dict[str, int] = {"width": 1366, "height": 900}
+DEFAULT_VIEWPORT: dict[str, int] = {"width": 1920, "height": 1080}
 DEFAULT_LOCALE: str = "en-US"
-DEFAULT_TIMEZONE: str = "America/New_York"
+DEFAULT_TIMEZONE: str = "America/Los_Angeles"
 DEFAULT_NAVIGATION_TIMEOUT_MS: int = 30_000
 DEFAULT_SETTLE_MS: int = 3_000
 DEFAULT_WAIT_UNTIL: WaitUntil = "domcontentloaded"
 DEFAULT_SELECTOR_TIMEOUT_MS: int = 10_000
+
+# Chromium launch args to suppress Playwright/CDP automation tells. The first
+# is the single most impactful flag against fingerprint-based bot detection
+# (Cloudflare et al inspect ``navigator.webdriver`` and a handful of related
+# automation markers). ``--no-sandbox`` is also pragmatic under WSL / CI where
+# the user-namespace sandbox often isn't available; without it Chromium can
+# fail to launch entirely.
+_CHROMIUM_LAUNCH_ARGS: tuple[str, ...] = (
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+)
+
+# Init script injected into every page before navigation. ``playwright-stealth``
+# 2.x patches navigator.webdriver in most cases, but the override below is
+# both a belt-and-suspenders backup AND the canonical signal we test against
+# in unit tests (so we can assert the contract without spinning up Chromium).
+_WEBDRIVER_OVERRIDE_SCRIPT: str = (
+    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+)
 
 
 class PlaywrightFetcher:
@@ -122,35 +141,62 @@ class PlaywrightFetcher:
         from playwright.sync_api import sync_playwright  # noqa: PLC0415 - intentional lazy import
 
         self._pw: Playwright = sync_playwright().start()
-        self._browser: Browser = self._pw.chromium.launch(headless=self._headless)
+        # Launch Chromium with automation-flag suppression. The most important
+        # one is ``--disable-blink-features=AutomationControlled`` which keeps
+        # ``navigator.webdriver`` from being a clear ``true`` and removes the
+        # ``Chrome-AutomationControlled`` infobar signal that Cloudflare and
+        # similar gates fingerprint on.
+        self._browser: Browser = self._pw.chromium.launch(
+            headless=self._headless,
+            args=list(_CHROMIUM_LAUNCH_ARGS),
+        )
 
         # Get the default UA so we can append our project identifier.
         # If anything goes wrong, fall back to a plain Chromium-like UA.
         ua = self._compose_user_agent()
         # Playwright expects a TypedDict for viewport — cast our dict at the boundary.
+        # Realistic context options: a desktop 1920x1080 viewport, a US locale
+        # / Pacific timezone, an explicit device scale factor, and a
+        # pre-granted geolocation permission make us look like a typical
+        # consumer browser rather than a freshly-constructed automation
+        # context.
         self._context: BrowserContext = self._browser.new_context(
             user_agent=ua,
             viewport=cast(Any, self._viewport),
             locale=self._locale,
             timezone_id=self._timezone_id,
+            device_scale_factor=1.0,
+            permissions=["geolocation"],
         )
         self._context.set_default_navigation_timeout(self._navigation_timeout_ms)
         self._context.set_default_timeout(self._navigation_timeout_ms)
 
-        # Apply playwright-stealth patches once at context level.
-        stealth_sync: Any | None
-        try:
-            from playwright_stealth import stealth_sync as _stealth_sync  # noqa: PLC0415
+        # Belt-and-suspenders: explicitly clobber navigator.webdriver via an
+        # init script BEFORE navigation. ``playwright-stealth`` 2.x usually
+        # patches this already, but applying it again at the context level
+        # guarantees the override on every page regardless of stealth's
+        # internal evasion enable/disable knobs.
+        self._context.add_init_script(_WEBDRIVER_OVERRIDE_SCRIPT)
 
-            stealth_sync = _stealth_sync
+        # Apply playwright-stealth patches once at context level. The 2.x API
+        # is ``Stealth().apply_stealth_sync(page_or_context)``; we apply to
+        # the context so every page created from it inherits the patches.
+        stealth_applied = False
+        try:
+            from playwright_stealth import Stealth  # noqa: PLC0415
+
+            Stealth().apply_stealth_sync(self._context)
+            stealth_applied = True
         except ImportError:  # pragma: no cover - dependency listed in pyproject
-            stealth_sync = None
-        self._stealth_sync = stealth_sync
+            logger.debug("playwright-stealth not installed; running without stealth patches")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("playwright-stealth apply failed: %r", exc)
+        self._stealth_applied = stealth_applied
 
         logger.info(
             "PlaywrightFetcher ready: headless=%s ua_suffix=%s wait_until=%s "
             "settle_ms=%d navigation_timeout_ms=%d selector_timeout_ms=%d "
-            "wait_for_selector_by_source=%s viewport=%s tz=%s",
+            "wait_for_selector_by_source=%s viewport=%s tz=%s stealth=%s",
             self._headless,
             self._ua_suffix,
             self._wait_until,
@@ -160,18 +206,17 @@ class PlaywrightFetcher:
             self._wait_for_selector_by_source,
             self._viewport,
             self._timezone_id,
+            self._stealth_applied,
         )
 
     # ------------------------------------------------------------- public API
 
     def fetch(self, url: str) -> FetchedPage:
         """Fetch ``url`` and return rendered HTML. Raises :class:`FetchError` on failure."""
+        # Stealth patches and the navigator.webdriver override are already
+        # applied at the context level (see ``__init__``), so every new page
+        # inherits them; no per-page setup is required here.
         page: Page = self._context.new_page()
-        if self._stealth_sync is not None:
-            try:
-                self._stealth_sync(page)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.debug("playwright-stealth patch failed: %r", exc)
         try:
             response = page.goto(
                 url,

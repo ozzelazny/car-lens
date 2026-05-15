@@ -162,3 +162,102 @@ def test_wait_until_literal_values() -> None:
         "load",
         "networkidle",
     )
+
+
+def test_chromium_launch_args_disable_automation() -> None:
+    """Chromium launch args must include the automation-suppression flag.
+
+    Without ``--disable-blink-features=AutomationControlled`` Chromium exposes
+    a clear ``navigator.webdriver`` signal that Cloudflare-class gates use to
+    serve 403 / Turnstile challenges to Playwright sessions. This flag is the
+    single most impactful piece of stealth hardening we apply at launch time.
+    """
+    assert "--disable-blink-features=AutomationControlled" in browser_mod._CHROMIUM_LAUNCH_ARGS
+
+
+def test_webdriver_override_init_script_targets_navigator_webdriver() -> None:
+    """The init script must clobber ``navigator.webdriver``.
+
+    Pure structural check of the constant; the per-page integration is
+    covered by ``test_fetcher_init_script_includes_webdriver_override`` below
+    via the sentinel-barrier pattern.
+    """
+    script = browser_mod._WEBDRIVER_OVERRIDE_SCRIPT
+    assert "navigator" in script
+    assert "webdriver" in script
+    assert "undefined" in script
+
+
+def test_fetcher_init_script_includes_webdriver_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructing the fetcher must call ``add_init_script`` with the override.
+
+    We intercept ``sync_playwright`` with a fake Playwright object that
+    records every ``add_init_script`` call made on the browser context, then
+    assert the navigator.webdriver override is among them. The fake also
+    short-circuits the rest of construction so we never need real Chromium.
+    """
+    import playwright.sync_api as pw_sync  # noqa: PLC0415 - test-only
+
+    recorded_init_scripts: list[str] = []
+
+    class _FakeContext:
+        def add_init_script(self, script: str) -> None:
+            recorded_init_scripts.append(script)
+
+        def set_default_navigation_timeout(self, _ms: int) -> None:
+            return None
+
+        def set_default_timeout(self, _ms: int) -> None:
+            return None
+
+        def new_page(self) -> object:  # pragma: no cover - unused in this test
+            raise RuntimeError("not used in this test")
+
+    class _FakeBrowser:
+        def new_context(self, **_kwargs: object) -> _FakeContext:
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def launch(self, **_kwargs: object) -> _FakeBrowser:
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        def __init__(self) -> None:
+            self.chromium = _FakeChromium()
+
+        def stop(self) -> None:
+            return None
+
+    class _FakeRunner:
+        def start(self) -> _FakePlaywright:
+            return _FakePlaywright()
+
+    def _fake_sync_playwright() -> _FakeRunner:
+        return _FakeRunner()
+
+    monkeypatch.setattr(pw_sync, "sync_playwright", _fake_sync_playwright)
+    # Bypass the UA-discovery probe (which would try to open a real page).
+    monkeypatch.setattr(
+        PlaywrightFetcher,
+        "_discover_default_user_agent",
+        lambda _self: "Mozilla/5.0 (FakeUA)",
+    )
+
+    # Construct the fetcher. We don't care about the resulting instance — we
+    # only care that ``add_init_script`` was called with our explicit
+    # navigator.webdriver override during construction (independent of any
+    # init scripts ``playwright-stealth`` may also add at the same time).
+    fetcher = PlaywrightFetcher()
+    try:
+        assert browser_mod._WEBDRIVER_OVERRIDE_SCRIPT in recorded_init_scripts, (
+            f"expected explicit navigator.webdriver override "
+            f"{browser_mod._WEBDRIVER_OVERRIDE_SCRIPT!r} in init scripts; "
+            f"got {recorded_init_scripts!r}"
+        )
+    finally:
+        fetcher.close()

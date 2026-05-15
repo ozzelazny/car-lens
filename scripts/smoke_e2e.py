@@ -75,6 +75,11 @@ SEED_URLS: list[tuple[str, str]] = [
     ),
     (
         "carsandbids",
+        # Cars & Bids: still on Playwright (React SPA — curl_cffi can't read
+        # JS-rendered listings). Smoke run 2 returned HTTP 403. Trying
+        # upgraded stealth (playwright-stealth 2.x + manual hardening) in this
+        # run. If still blocked, this is likely Cloudflare Turnstile (CAPTCHA),
+        # which is not defeatable without a solver — accept the gap.
         "https://carsandbids.com/search?q=Honda+Civic",
     ),
 ]
