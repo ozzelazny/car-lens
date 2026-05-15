@@ -723,6 +723,31 @@ def test_cli_proxy_invalid_env_rejected(
     assert "--proxy" in err
 
 
+def test_cli_proxy_invalid_url_with_credentials_does_not_leak(
+    db_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed --proxy URL with credentials must NOT echo them to stderr."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+    with pytest.raises(SystemExit):
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--proxy",
+                "http://supersecretuser:supersecretpass@host",  # no port
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    captured = capsys.readouterr()
+    assert "supersecretpass" not in captured.err
+    assert "supersecretuser" not in captured.err
+    # The error message itself should still surface (just without credentials).
+    assert "proxy" in captured.err.lower() or "port" in captured.err.lower()
+
+
 def test_cli_proxy_not_logged_with_credentials(
     db_path: Path,
     caplog: pytest.LogCaptureFixture,

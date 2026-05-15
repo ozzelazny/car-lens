@@ -87,6 +87,32 @@ def test_parse_proxy_url_whitespace() -> None:
         parse_proxy_url("   ")
 
 
+def test_parse_proxy_url_missing_port_does_not_leak_credentials() -> None:
+    """Missing-port error must not include user:pass credentials."""
+    url = "http://supersecretuser:supersecretpass@host"  # no port
+    try:
+        parse_proxy_url(url)
+    except ValueError as exc:
+        msg = str(exc)
+        assert "supersecretpass" not in msg
+        assert "supersecretuser" not in msg
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_parse_proxy_url_missing_host_does_not_leak_credentials() -> None:
+    """Missing-host error must not include user:pass credentials."""
+    url = "http://supersecretuser:supersecretpass@:8080"  # creds present, no hostname
+    try:
+        parse_proxy_url(url)
+    except ValueError as exc:
+        msg = str(exc)
+        assert "supersecretpass" not in msg
+        assert "supersecretuser" not in msg
+    else:
+        raise AssertionError("expected ValueError")
+
+
 # ----------------------------------------------------------- validate_proxy_url
 
 

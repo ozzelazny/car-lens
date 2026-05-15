@@ -54,10 +54,14 @@ def validate_proxy_url(url: str) -> str:
             f"unsupported proxy scheme: {parsed.scheme!r} "
             f"(allowed: {sorted(ALLOWED_PROXY_SCHEMES)})"
         )
+    # Build a credentials-free reference for any remaining error messages.
+    # NEVER include `url`, `parsed.netloc`, `parsed.username`, or `parsed.password`
+    # in error messages -- they flow to stderr / CI logs / error reporters.
+    safe_endpoint = f"{parsed.scheme}://{parsed.hostname or '<no-host>'}"
     if not parsed.hostname:
-        raise ValueError(f"proxy URL must include host: {url!r}")
+        raise ValueError(f"proxy URL must include host: {safe_endpoint}")
     if parsed.port is None:
-        raise ValueError(f"proxy URL must include port: {url!r}")
+        raise ValueError(f"proxy URL must include port: {safe_endpoint}")
     return url
 
 
