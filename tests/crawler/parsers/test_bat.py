@@ -220,9 +220,10 @@ def test_parse_listing_extracts_make_model_from_name_when_jsonld_null() -> None:
     listing = result.new_listing
     assert listing.year == 1991
     assert listing.make == "Honda"
-    # No boundary tokens after the make → both "CRX" and "Si" are pulled
-    # in, title-cased per-token. Lock in the implemented behaviour.
-    assert listing.model == "Crx Si"
+    # Model is capped at the FIRST token after the make; the tail
+    # ("Si") goes into ``trim``.
+    assert listing.model == "Crx"
+    assert listing.trim == "Si"
 
 
 def test_parse_listing_explicit_brand_wins_over_name_parse() -> None:
@@ -315,7 +316,8 @@ def test_parse_listing_prefix_words_before_year_are_skipped() -> None:
     listing = result.new_listing
     assert listing.year == 1986
     assert listing.make == "Honda"
-    assert listing.model == "Civic Si"
+    assert listing.model == "Civic"
+    assert listing.trim == "Si"
 
 
 def test_parse_listing_two_word_make_in_name() -> None:
@@ -348,22 +350,53 @@ def test_parse_listing_two_word_make_in_name() -> None:
     assert listing.model == "Defender"
 
 
-def test_parse_name_make_model_unit_skips_prefix_and_finds_year() -> None:
-    """Direct unit test on the helper — confirms the (make, model) tuple
-    shape without going through the full ``_parse_listing`` flow."""
+def test_parse_name_make_model_strips_trim_into_separate_field() -> None:
+    """The model walk caps at the first token; the rest goes to ``trim``.
+
+    Real-world examples from smoke run 2: BaT names like
+    ``"1991 Honda CRX Si"`` and ``"1989 Honda Civic Cx Hatchback 5-Speed"``
+    used to collapse the whole tail into ``model``. Post-fix, the model
+    is the first token after the make and ``trim`` holds the rest.
+    """
     parser = BringATrailerParser()
-    make, model = parser._parse_name_make_model("No Reserve: Original-Owner 1986 Honda Civic Si")
+
+    make, model, trim = parser._parse_name_make_model("1991 Honda CRX Si")
     assert make == "Honda"
-    assert model == "Civic Si"
+    assert model == "Crx"
+    assert trim == "Si"
+
+    make, model, trim = parser._parse_name_make_model("1989 Honda Civic Cx Hatchback 5-Speed")
+    assert make == "Honda"
+    assert model == "Civic"
+    assert trim == "Cx Hatchback 5-Speed"
+
+    # Two-word make: the make consumes two tokens, so ``Defender`` is
+    # still the first model token. Tail ("90") becomes the trim.
+    make, model, trim = parser._parse_name_make_model("2018 Land Rover Defender 90")
+    assert make == "Land Rover"
+    assert model == "Defender"
+    assert trim == "90"
+
+
+def test_parse_name_make_model_unit_skips_prefix_and_finds_year() -> None:
+    """Direct unit test on the helper — confirms the (make, model, trim)
+    tuple shape without going through the full ``_parse_listing`` flow."""
+    parser = BringATrailerParser()
+    make, model, trim = parser._parse_name_make_model(
+        "No Reserve: Original-Owner 1986 Honda Civic Si"
+    )
+    assert make == "Honda"
+    assert model == "Civic"
+    assert trim == "Si"
 
 
 def test_parse_name_make_model_unit_empty_or_unknown() -> None:
-    """Empty / non-matching names return (None, None)."""
+    """Empty / non-matching names return (None, None, None)."""
     parser = BringATrailerParser()
-    assert parser._parse_name_make_model(None) == (None, None)
-    assert parser._parse_name_make_model("") == (None, None)
+    assert parser._parse_name_make_model(None) == (None, None, None)
+    assert parser._parse_name_make_model("") == (None, None, None)
     # No year, no known make → nothing to anchor on.
-    assert parser._parse_name_make_model("Some random text 4242") == (None, None)
+    assert parser._parse_name_make_model("Some random text 4242") == (None, None, None)
 
 
 def test_raw_html_sha256_populated(load_fixture: _LoadFixture) -> None:

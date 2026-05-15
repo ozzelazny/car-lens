@@ -30,8 +30,11 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
-# Listing-card href shape: /vehicledetail/{native_id}/ (trailing slash optional).
-_LISTING_HREF_RE = re.compile(r"^/vehicledetail/[^/]+/?$")
+# Listing-card href shape: ``/vehicledetail/{native_id}/`` (trailing slash
+# optional). cars.com also exposes sub-routes on the same listing —
+# ``/overview/``, ``/photos/``, ``/features/`` — that we accept as
+# equivalent entry points.
+_LISTING_HREF_RE = re.compile(r"^/vehicledetail/[^/]+(?:/(?:overview|photos|features))?/?$")
 
 # Native ID extractor from a full listing URL path.
 _LISTING_ID_FROM_URL_RE = re.compile(r"/vehicledetail/([^/?#]+)/?")
@@ -74,15 +77,21 @@ class CarsComParser:
         target_make = _as_str(hints.get("target_make"))
         target_model = _as_str(hints.get("target_model"))
 
+        # Match listing hrefs in BOTH plain ``<a>`` tags AND
+        # ``<spark-link-button>`` custom elements. cars.com migrated newer
+        # listing cards to a Web Component that BeautifulSoup's
+        # ``find_all("a", href=True)`` does not pick up, so we broaden the
+        # tag selector to keep both old and new card shapes working.
         listing_urls: list[str] = []
         seen: set[str] = set()
-        for anchor in soup.find_all("a", href=True):
-            href = anchor.get("href")
+        for tag in soup.find_all(["a", "spark-link-button"]):
+            href = tag.get("href")
             if not isinstance(href, str):
                 continue
-            if not _LISTING_HREF_RE.match(href.strip()):
+            stripped = href.strip()
+            if not stripped or not _LISTING_HREF_RE.match(stripped):
                 continue
-            absolute = normalize_url(url, href.strip())
+            absolute = normalize_url(url, stripped)
             if absolute in seen:
                 continue
             seen.add(absolute)

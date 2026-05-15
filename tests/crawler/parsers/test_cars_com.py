@@ -89,6 +89,50 @@ def test_parse_search_empty_html_returns_notes() -> None:
     assert any("no listing cards" in n for n in result.notes)
 
 
+def test_parse_search_extracts_hrefs_from_spark_link_button() -> None:
+    """cars.com newer listing cards use ``<spark-link-button>`` custom
+    elements instead of plain ``<a>`` tags. The parser must pick up the
+    href from either tag type."""
+    html = """
+    <html><body>
+      <ul class="vehicle-cards">
+        <li class="vehicle-card">
+          <spark-link-button href="/vehicledetail/12345/">View listing</spark-link-button>
+        </li>
+      </ul>
+    </body></html>
+    """
+    parser = CarsComParser()
+    result = parser.parse(html=html, url=SEARCH_URL, kind="search", hints={})
+
+    listings = [u for u in result.new_urls if u.kind == "listing"]
+    assert len(listings) == 1
+    assert listings[0].url == "https://www.cars.com/vehicledetail/12345/"
+    assert listings[0].source == "cars_com"
+
+
+def test_parse_search_accepts_overview_suffix() -> None:
+    """The href regex accepts ``/overview/``, ``/photos/``, and
+    ``/features/`` sub-routes on a listing-detail URL."""
+    html = """
+    <html><body>
+      <a class="vehicle-card-link" href="/vehicledetail/12345/overview/">View</a>
+      <a class="image-link" href="/vehicledetail/67890/photos/">Photos</a>
+      <a class="features-link" href="/vehicledetail/24680/features/">Features</a>
+    </body></html>
+    """
+    parser = CarsComParser()
+    result = parser.parse(html=html, url=SEARCH_URL, kind="search", hints={})
+
+    listings = [u for u in result.new_urls if u.kind == "listing"]
+    listing_urls = sorted(u.url for u in listings)
+    assert listing_urls == [
+        "https://www.cars.com/vehicledetail/12345/overview/",
+        "https://www.cars.com/vehicledetail/24680/features/",
+        "https://www.cars.com/vehicledetail/67890/photos/",
+    ]
+
+
 # ---------- listing ---------------------------------------------------------
 
 

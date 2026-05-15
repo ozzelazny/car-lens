@@ -67,11 +67,66 @@ _YEAR_TOKEN_RE = re.compile(r"^\d{4}$")
 # the tokenizer above so this only fires on a bare dash.
 _BAT_MODEL_BOUNDARY_TOKENS: frozenset[str] = frozenset({"-", "$", "(", ")", "|", "·", ":"})
 
-# Maximum number of tokens we accept as the model name. BaT names are
-# verbose ("Civic Si", "911 Carrera Targa", "Defender 110 V8") so we
-# allow up to 4 — Craigslist caps at 2, but BaT auctions routinely
-# include sub-model/configuration words that look natural as the model.
-_BAT_MAX_MODEL_TOKENS: int = 4
+# Common trim / transmission / body-style tokens that should not appear
+# inside the ``model`` field. With ``_BAT_MAX_MODEL_TOKENS=1`` this set
+# is documentation rather than active filtering — the single-token cap
+# stops the walk before any of these can creep into the model — but it
+# records the rule explicitly for future maintainers and tests.
+_BAT_TRIM_STOPWORDS: frozenset[str] = frozenset(
+    {
+        # Honda / Toyota / domestic trim badges.
+        "si",
+        "ex",
+        "lx",
+        "dx",
+        "cx",
+        "ls",
+        "lt",
+        "ltz",
+        "se",
+        "sel",
+        "sl",
+        "slt",
+        # Transmission descriptors.
+        "5-speed",
+        "6-speed",
+        "4-speed",
+        "manual",
+        "automatic",
+        "awd",
+        "4wd",
+        "fwd",
+        "rwd",
+        # Body styles.
+        "hatchback",
+        "sedan",
+        "coupe",
+        "convertible",
+        "wagon",
+        "suv",
+        "truck",
+        # Sport / performance suffixes.
+        "touring",
+        "sport",
+        "type",
+        "r",
+        "s",
+        "x",
+        "gt",
+        "rs",
+        "trd",
+        "limited",
+    }
+)
+
+# Maximum number of tokens we accept as the model name. We cap at 1:
+# most BaT model names are single words (``Civic``, ``CRX``, ``Defender``,
+# ``911``, ``F-150``). Anything after the first token (trim, transmission,
+# body-style) is routed into ``trim`` instead. Multi-word makes are still
+# handled — ``Land Rover Defender`` works because the make consumes two
+# tokens before the model walk starts, so ``Defender`` is still the first
+# model token.
+_BAT_MAX_MODEL_TOKENS: int = 1
 
 
 class BringATrailerParser:
@@ -233,20 +288,25 @@ class BringATrailerParser:
         jsonld_make = _name_or_string(vehicle.get("manufacturer") or vehicle.get("brand"))
         jsonld_model = _name_or_string(vehicle.get("model"))
 
-        # Step 2: derive make/model from ``name`` only for fields that
+        # Step 2: derive make/model/trim from ``name`` only for fields that
         # the explicit JSON-LD didn't already supply. This means explicit
         # ``brand``/``manufacturer`` wins (the existing contract); we only
         # name-parse when those are null.
         name_make: str | None = None
         name_model: str | None = None
+        name_trim: str | None = None
         if jsonld_make is None or jsonld_model is None:
-            name_make, name_model = self._parse_name_make_model(name_str)
+            name_make, name_model, name_trim = self._parse_name_make_model(name_str)
 
         year = jsonld_year if jsonld_year is not None else hint_year
         make = jsonld_make if jsonld_make is not None else (name_make or hint_make)
         model = jsonld_model if jsonld_model is not None else (name_model or hint_model)
 
+        # ``trim`` only falls back to the name-parsed tail when JSON-LD
+        # doesn't supply its own ``vehicleConfiguration`` / ``trim``.
         trim = _as_str(vehicle.get("vehicleConfiguration") or vehicle.get("trim"))
+        if trim is None:
+            trim = name_trim
         mileage = _parse_mileage(vehicle.get("mileageFromOdometer"))
         vin = _as_str(vehicle.get("vehicleIdentificationNumber"))
         body_style = _as_str(vehicle.get("bodyType"))
@@ -270,8 +330,8 @@ class BringATrailerParser:
 
     # ------------------------------------------------------------- name parser
 
-    def _parse_name_make_model(self, name: str | None) -> tuple[str | None, str | None]:
-        """Extract ``(make, model)`` from a BaT ``name`` field.
+    def _parse_name_make_model(self, name: str | None) -> tuple[str | None, str | None, str | None]:
+        """Extract ``(make, model, trim)`` from a BaT ``name`` field.
 
         BaT names follow ``"<year> <make> <model> [<trim>] ..."`` but
         often carry editorial prefixes like ``"No Reserve:"`` or
@@ -284,22 +344,30 @@ class BringATrailerParser:
              :func:`parse_year_safe`; we just need the cursor position.)
           3. Match a two-word make first (``Land Rover``, ``Alfa Romeo``),
              then a single-word make against the known-makes pool.
-          4. Take the next 1-4 tokens as the model, stopping on price /
-             parenthesis / pipe / dash separators.
+          4. Take the FIRST token after the make as the model (cap of
+             :data:`_BAT_MAX_MODEL_TOKENS` = 1). Most BaT model names are
+             single-word: ``Civic``, ``CRX``, ``Defender``, ``911``,
+             ``F-150``. Multi-word makes already consumed two tokens, so
+             ``Land Rover Defender`` correctly yields model=``Defender``.
+          5. Collect any remaining tokens (up to the first boundary
+             separator such as ``-``, ``$``, ``(``, ``|``) into ``trim``.
+             This is what catches sub-trim and transmission descriptors
+             like ``Si``, ``Cx Hatchback 5-Speed``, ``Type R``.
 
         Returns
         -------
-        ``(make, model)`` with each field set to ``None`` when the
+        ``(make, model, trim)`` with each field set to ``None`` when the
         respective extraction failed. Make is returned in the canonical
         case used by ``MAKE_POPULARITY`` (e.g. ``"Honda"``, ``"Bmw"``);
-        model is title-cased per-token, preserving digits and hyphens.
+        model and trim are title-cased per-token, preserving digits and
+        hyphens.
         """
         if not name:
-            return (None, None)
+            return (None, None, None)
 
         tokens = [t for t in _NAME_SPLIT_RE.split(name.strip()) if t]
         if not tokens:
-            return (None, None)
+            return (None, None, None)
         lower_tokens = [t.lower() for t in tokens]
 
         # Step 2: find the year token's index so we can resume scanning
@@ -328,25 +396,44 @@ class BringATrailerParser:
                 break
 
         if make_canonical is None or make_end_idx < 0:
-            return (None, None)
+            return (None, None, None)
 
-        # Step 4: collect up to 4 model tokens, stopping at boundary chars.
+        # Step 4: collect model tokens (capped at _BAT_MAX_MODEL_TOKENS=1),
+        # stopping at boundary chars. Step 5 below sweeps the rest into
+        # ``trim``.
         model_tokens: list[str] = []
+        trim_start_idx = make_end_idx
         for j in range(make_end_idx, len(lower_tokens)):
             tok = tokens[j]
             if tok in _BAT_MODEL_BOUNDARY_TOKENS:
+                trim_start_idx = j
                 break
             if tok.startswith("$") or tok.startswith("(") or tok.startswith("|"):
+                trim_start_idx = j
                 break
             model_tokens.append(tok)
+            trim_start_idx = j + 1
             if len(model_tokens) >= _BAT_MAX_MODEL_TOKENS:
                 break
 
         if not model_tokens:
-            return (make_canonical, None)
+            return (make_canonical, None, None)
 
         model_str = " ".join(_titlecase_model_token(t) for t in model_tokens)
-        return (make_canonical, model_str)
+
+        # Step 5: tail tokens become the trim. Stop on the same boundary
+        # separators we use for the model walk.
+        trim_tokens: list[str] = []
+        for k in range(trim_start_idx, len(lower_tokens)):
+            tok = tokens[k]
+            if tok in _BAT_MODEL_BOUNDARY_TOKENS:
+                break
+            if tok.startswith("$") or tok.startswith("(") or tok.startswith("|"):
+                break
+            trim_tokens.append(tok)
+
+        trim_str = " ".join(_titlecase_model_token(t) for t in trim_tokens) if trim_tokens else None
+        return (make_canonical, model_str, trim_str)
 
 
 # ---------- helpers ----------------------------------------------------------

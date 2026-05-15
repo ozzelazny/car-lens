@@ -98,12 +98,18 @@ def bringatrailer(make: str, model: str, year_min: int, year_max: int) -> list[s
 
 
 def hemmings(make: str, model: str, year_min: int, year_max: int) -> list[str]:
-    """Build the Hemmings classifieds search URL for one ``(make, model, year-range)``."""
+    """Build the Hemmings classifieds search URL for one ``(make, model, year-range)``.
+
+    Hemmings strips ``?Make=&Model=`` query-string filters on the redirect
+    chain and serves the bare category landing page, so we encode the
+    make/model as slug path segments instead — the same convention
+    cars.com and AutoTrader use. Year filters survive as query params.
+    """
+    make_slug = _slug(make)
+    model_slug = _slug(model)
     url = (
-        f"https://www.hemmings.com/classifieds/cars-for-sale"
-        f"?Make={quote_plus(make)}"
-        f"&Model={quote_plus(model)}"
-        f"&YearFrom={year_min}&YearTo={year_max}"
+        f"https://www.hemmings.com/classifieds/cars-for-sale/{make_slug}/{model_slug}"
+        f"?YearFrom={year_min}&YearTo={year_max}"
     )
     return [url]
 

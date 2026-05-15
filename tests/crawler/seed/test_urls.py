@@ -64,9 +64,11 @@ def test_bringatrailer_known_url() -> None:
 
 def test_hemmings_known_url() -> None:
     [url] = hemmings(MAKE, MODEL, YMIN, YMAX)
+    # Hemmings now uses slug-path form (the ``?Make=&Model=`` query-string
+    # form gets stripped on redirect to the bare category page).
     assert url == (
-        "https://www.hemmings.com/classifieds/cars-for-sale"
-        "?Make=Mercedes-Benz&Model=GLA&YearFrom=2020&YearTo=2022"
+        "https://www.hemmings.com/classifieds/cars-for-sale/mercedes-benz/gla"
+        "?YearFrom=2020&YearTo=2022"
     )
 
 
@@ -89,13 +91,20 @@ def test_url_encoding_of_special_chars_slug_sites() -> None:
 
 
 def test_url_encoding_of_special_chars_query_sites() -> None:
-    """Make names with spaces become quote_plus'd (+) in query-style URLs."""
-    [u1] = hemmings("Land Rover", "Range Rover", 2018, 2024)
-    assert "Make=Land+Rover" in u1
-    assert "Model=Range+Rover" in u1
-
+    """Carsandbids still uses quote_plus query encoding; Hemmings moved
+    to slug-path form (verified separately in
+    :func:`test_hemmings_slug_path_handles_spaces_in_make_model`)."""
     [u2] = carsandbids("Land Rover", "Range Rover", 2018, 2024)
     assert "q=Land+Rover+Range+Rover" in u2
+
+
+def test_hemmings_slug_path_handles_spaces_in_make_model() -> None:
+    """Spaces in make/model become hyphens in the Hemmings slug path
+    (same convention as cars.com / AutoTrader / BaT)."""
+    [u1] = hemmings("Land Rover", "Range Rover", 2018, 2024)
+    assert "/cars-for-sale/land-rover/range-rover" in u1
+    assert "YearFrom=2018" in u1
+    assert "YearTo=2024" in u1
 
 
 def test_site_builders_registry_keys_match_db_check_constraint() -> None:
