@@ -14,7 +14,7 @@ from car_lense_engine.crawler.parsers.base import (
     ParsedListing,
     ParseResult,
 )
-from car_lense_engine.db import queue
+from car_lense_engine.db import Listing, listings, queue
 
 from .conftest import FakeFetcher, FakeParser
 
@@ -313,3 +313,61 @@ def test_run_one_duplicate_listing_treated_as_success(
     assert worker.stats.requests_succeeded == 2
     # listings_inserted only counts the first one.
     assert worker.stats.listings_inserted == 1
+
+
+def test_run_one_images_enqueued_even_when_listing_already_exists(
+    db: sqlite3.Connection, fake_fetcher: FakeFetcher
+) -> None:
+    """Regression: a retry that hits IntegrityError on the listings insert must
+    still enqueue the parser's image URLs.
+
+    Scenario: a prior worker run inserted the ``listings`` row for
+    ``cars_com:200`` and then crashed before enqueuing the listing's images.
+    On the next run, we claim the same listing URL again; the parser returns
+    the same listing_id (so the insert raises IntegrityError) plus two
+    image_urls. Those two URLs MUST land in the queue — anything else is
+    silent data loss.
+    """
+    url = "https://cars.com/listing/200"
+    # Pre-insert the listings row as if a prior run had written it.
+    listings.insert_listing(
+        db,
+        Listing(
+            listing_id="cars_com:200",
+            source="cars_com",
+            url=url,
+        ),
+    )
+    # Enqueue the same listing URL — this is the retry.
+    queue.enqueue(db, url=url, source="cars_com", kind="listing")
+
+    image_urls = [
+        "https://img1.example.com/a.jpg",
+        "https://img2.example.com/b.jpg",
+    ]
+    parsed = ParsedListing(
+        listing_id="cars_com:200",
+        source="cars_com",
+        url=url,
+        image_urls=image_urls,
+    )
+    parser = FakeParser(source="cars_com", result_factory=ParseResult(new_listing=parsed))
+    worker, _ = _make_worker(db, fetcher=fake_fetcher, parser=parser)
+
+    assert worker.run_one() is True
+
+    # The single pre-existing listings row is unchanged — no new insert happened.
+    n_listings = db.execute("SELECT COUNT(*) AS n FROM listings").fetchone()
+    assert int(n_listings["n"]) == 1
+    assert worker.stats.listings_inserted == 0
+
+    # Load-bearing assertion: BOTH image URLs are now in the queue.
+    img_rows = db.execute(
+        "SELECT url FROM crawl_queue WHERE kind = 'image' ORDER BY url"
+    ).fetchall()
+    assert [r["url"] for r in img_rows] == sorted(image_urls)
+    assert worker.stats.urls_enqueued == 2
+
+    # Listing queue item marked done (not failed).
+    q = db.execute("SELECT status FROM crawl_queue WHERE url = ?", (url,)).fetchone()
+    assert q["status"] == "done"

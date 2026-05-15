@@ -177,12 +177,18 @@ class Worker:
         try:
             listings.insert_listing(self.conn, listing)
         except sqlite3.IntegrityError:
-            # Already inserted (e.g., revisit). Treat as a no-op success.
+            # Already inserted (e.g., revisit / retry after partial run).
+            # Treat as a no-op success — do NOT skip image enqueue: if a
+            # prior run wrote the listing row but crashed before enqueuing
+            # all images, the retry must still get those images into the
+            # queue. The queue layer dedupes via INSERT OR IGNORE so this
+            # is safe to run unconditionally.
             logger.debug("listing already present, skipping insert: %s", parsed.listing_id)
-            return
-        self.stats.listings_inserted += 1
+        else:
+            self.stats.listings_inserted += 1
 
         # Image URLs from the listing are enqueued as image-kind queue items.
+        # Run unconditionally — see comment in the except branch above.
         for image_url in parsed.image_urls:
             self._enqueue(
                 DiscoveredUrl(
