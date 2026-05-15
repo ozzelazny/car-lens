@@ -34,6 +34,18 @@ REAL_SEARCH_FIXTURE = (
 # native_id, so the lower bound is the distinct-listing count.
 REAL_SEARCH_MIN_LISTINGS = 27
 
+# Real-world DETAIL-page fixture saved by
+# ``scripts/fetch_carscom_detail.py`` against the first cars.com listing
+# URL enqueued by smoke run #5. The page is the 613 KB SSR'd VDP for a
+# used 2020 Honda Civic LX. Production HTML carries the canonical fields
+# in an inline ``CarsWeb.VehicleDetailController.show`` JSON state blob,
+# NOT in a schema.org JSON-LD ``Vehicle`` block; this fixture locks in
+# the parser's CarsWeb fallback against that real shape.
+REAL_DETAIL_FIXTURES_GLOB = "cars_com_detail_*.html"
+# Native id parsed from the URL of the fixture above.
+REAL_DETAIL_LISTING_ID = "3715142b-250e-4689-a303-e5924eb2ceaa"
+REAL_DETAIL_URL = f"https://www.cars.com/vehicledetail/{REAL_DETAIL_LISTING_ID}/"
+
 
 class _LoadFixture(Protocol):
     def __call__(self, name: str) -> str: ...
@@ -294,3 +306,46 @@ def test_parse_search_real_html_extracts_listings() -> None:
         native_id = du.url.rstrip("/").rsplit("/", 1)[-1]
         assert native_id not in seen_ids, f"duplicate native id: {native_id}"
         seen_ids.add(native_id)
+
+
+def test_parse_listing_real_html_extracts_canonical_fields() -> None:
+    """Lock in detail-page parsing against the real saved fixture.
+
+    Real cars.com VDPs do NOT embed a schema.org Vehicle JSON-LD block;
+    the canonical fields live in the inline
+    ``<script id="CarsWeb.VehicleDetailController.show">`` JSON state.
+    This test guards the CarsWeb fallback so we don't silently regress
+    back to "no Vehicle JSON-LD found" for every production listing.
+    """
+    fixture_dir = Path(__file__).parent / "fixtures" / "real_world"
+    matches = sorted(fixture_dir.glob(REAL_DETAIL_FIXTURES_GLOB))
+    assert matches, (
+        f"no real cars.com detail fixtures matching {REAL_DETAIL_FIXTURES_GLOB!r} "
+        f"in {fixture_dir}; run scripts/fetch_carscom_detail.py to create one"
+    )
+    html_path = matches[0]
+    html = html_path.read_text(encoding="utf-8")
+    parser = CarsComParser()
+    result = parser.parse(html=html, url=REAL_DETAIL_URL, kind="listing", hints={})
+
+    assert result.new_listing is not None, result.notes
+    pl = result.new_listing
+    # At minimum: year, make, model must be populated for a real cars.com page.
+    assert pl.year is not None
+    assert pl.make is not None
+    assert pl.model is not None
+    # The known shape of the fixture (used 2020 Honda Civic LX). These hard
+    # asserts catch silent regressions if the parser starts picking up the
+    # wrong sub-tree.
+    assert pl.year == 2020
+    assert pl.make == "Honda"
+    assert pl.model == "Civic"
+    assert pl.trim == "LX"
+    assert pl.body_style == "Sedan"
+    assert pl.vin == "19XFC2F69LE000132"
+    assert pl.mileage == 76939
+    # Image URLs come from the ``<img slot="image">`` fallback on real HTML.
+    assert len(pl.image_urls) >= 1
+    assert all("platform.cstatic-images.com" in u for u in pl.image_urls)
+    # listing_id derived from URL.
+    assert pl.listing_id == f"cars_com:{REAL_DETAIL_LISTING_ID}"

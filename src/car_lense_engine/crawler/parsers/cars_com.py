@@ -1,8 +1,26 @@
 """cars.com parser — search pages and individual listing pages.
 
-Listing pages embed a JSON-LD ``Vehicle`` (sometimes ``Car`` or ``Product``)
-block we read directly. Search pages we scrape via CSS selectors plus a
-regex on listing-card hrefs of the form ``/vehicledetail/<native_id>/``.
+Listing pages in 2026 are server-rendered with an inline JSON state blob
+in ``<script type="application/json" id="CarsWeb.VehicleDetailController.show">``
+that holds every canonical field (year, make, model, trim, vin, mileage,
+body_style) on a real production page. Hand-crafted test fixtures embed
+the same fields in a JSON-LD ``Vehicle`` block; both shapes are supported.
+
+Extraction order on a listing page:
+
+1. JSON-LD ``Vehicle`` / ``Car`` / ``Product`` block (legacy / fixture path).
+2. Inline ``CarsWeb.VehicleDetailController.show`` JSON blob —
+   ``call_source_dni_metadata.dimensions`` and ``dealer_chat_metadata.carsData``
+   (production path).
+3. ``<title>`` / ``<h1 id="vehicle-title">`` fallback for year/make/model
+   if neither of the above produced them.
+
+Images are pulled from the JSON-LD ``image`` array first, falling back to
+``<img slot="image">`` tags pointing at ``platform.cstatic-images.com``
+(the gallery wrapper cars.com uses for vehicle photos).
+
+Search pages we scrape via CSS selectors plus a regex on listing-card
+hrefs of the form ``/vehicledetail/<native_id>/``.
 
 Both flows are defensive: any unexpected shape is logged via
 :class:`ParseResult.notes` rather than raising, since the worker treats
@@ -11,6 +29,7 @@ exceptions as hard failures.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -168,33 +187,87 @@ class CarsComParser:
     ) -> ParseResult:
         del hints  # listing extraction does not need target_* hints
 
+        native_id = _extract_native_id(url)
+        if native_id is None:
+            return ParseResult(notes=[f"could not extract listing_id from URL: {url}"])
+
+        notes: list[str] = []
+        soup = BeautifulSoup(html, features="lxml")
+
+        # --- primary path: JSON-LD Vehicle/Car/Product ----------------------
         blocks = extract_jsonld(html)
         vehicle = (
             find_jsonld_by_type(blocks, "Vehicle")
             or find_jsonld_by_type(blocks, "Car")
             or find_jsonld_by_type(blocks, "Product")
         )
-        if vehicle is None:
-            return ParseResult(notes=["no Vehicle JSON-LD found"])
 
-        native_id = _extract_native_id(url)
-        if native_id is None:
-            return ParseResult(notes=[f"could not extract listing_id from URL: {url}"])
+        year: int | None = None
+        make: str | None = None
+        model: str | None = None
+        trim: str | None = None
+        mileage: int | None = None
+        vin: str | None = None
+        body_style: str | None = None
+        image_urls: list[str] = []
 
-        year = parse_year_safe(
-            _as_str(
-                vehicle.get("vehicleModelDate")
-                or vehicle.get("modelDate")
-                or vehicle.get("productionDate")
+        if vehicle is not None:
+            year = parse_year_safe(
+                _as_str(
+                    vehicle.get("vehicleModelDate")
+                    or vehicle.get("modelDate")
+                    or vehicle.get("productionDate")
+                )
             )
-        )
-        make = _name_or_string(vehicle.get("manufacturer"))
-        model = _name_or_string(vehicle.get("model"))
-        trim = _as_str(vehicle.get("vehicleConfiguration") or vehicle.get("trim"))
-        mileage = _parse_mileage(vehicle.get("mileageFromOdometer"))
-        vin = _as_str(vehicle.get("vehicleIdentificationNumber"))
-        body_style = _as_str(vehicle.get("bodyType"))
-        image_urls = _extract_image_urls(vehicle.get("image"))
+            make = _name_or_string(vehicle.get("manufacturer"))
+            model = _name_or_string(vehicle.get("model"))
+            trim = _as_str(vehicle.get("vehicleConfiguration") or vehicle.get("trim"))
+            mileage = _parse_mileage(vehicle.get("mileageFromOdometer"))
+            vin = _as_str(vehicle.get("vehicleIdentificationNumber"))
+            body_style = _as_str(vehicle.get("bodyType"))
+            image_urls = _extract_image_urls(vehicle.get("image"))
+
+        # --- secondary path: CarsWeb.VehicleDetailController.show JSON blob --
+        # Real cars.com production pages embed structured vehicle state in
+        # an inline ``<script type="application/json" id="CarsWeb...">`` blob
+        # rather than schema.org JSON-LD. We probe two sub-trees that both
+        # carry the canonical fields and merge anything the JSON-LD path
+        # missed.
+        cars_web = _extract_cars_web_state(soup)
+        if cars_web is not None:
+            cw_year, cw_make, cw_model, cw_trim, cw_mileage, cw_vin, cw_body = (
+                _fields_from_cars_web_state(cars_web)
+            )
+            year = year if year is not None else cw_year
+            make = make if make is not None else cw_make
+            model = model if model is not None else cw_model
+            trim = trim if trim is not None else cw_trim
+            mileage = mileage if mileage is not None else cw_mileage
+            vin = vin if vin is not None else cw_vin
+            body_style = body_style if body_style is not None else cw_body
+
+        # --- last-resort heuristic: <title> / <h1 id="vehicle-title"> --------
+        # The title looks like "Used 2020 Honda Civic LX For Sale ... | Cars.com"
+        # and the H1 like "Used 2020 Honda Civic LX". Both reliably contain
+        # year/make/model when other sources have failed.
+        if year is None or make is None or model is None:
+            t_year, t_make, t_model, t_trim = _heuristic_from_title(soup)
+            year = year if year is not None else t_year
+            make = make if make is not None else t_make
+            model = model if model is not None else t_model
+            trim = trim if trim is not None else t_trim
+
+        # --- image fallback: <img slot="image" src=...> ----------------------
+        # Real cars.com listings render the photo gallery as ``<img slot="image">``
+        # pointing at ``platform.cstatic-images.com``. The JSON-LD ``image``
+        # array is absent on production HTML, so we fall back here.
+        if not image_urls:
+            image_urls = _extract_gallery_image_urls(soup)
+
+        if vehicle is None and cars_web is None and (year is None or make is None):
+            return ParseResult(notes=["no Vehicle JSON-LD found and no CarsWeb state on page"])
+        if vehicle is None:
+            notes.append("JSON-LD Vehicle/Car/Product absent; used CarsWeb state fallback")
 
         listing = ParsedListing(
             listing_id=f"{self.source}:{native_id}",
@@ -210,10 +283,172 @@ class CarsComParser:
             raw_html_sha256=sha256_text(html),
             image_urls=image_urls,
         )
-        return ParseResult(new_listing=listing)
+        return ParseResult(new_listing=listing, notes=notes)
 
 
 # ---------- helpers ----------------------------------------------------------
+
+
+def _extract_cars_web_state(soup: BeautifulSoup) -> dict[str, Any] | None:
+    """Return parsed JSON from ``<script id="CarsWeb.VehicleDetailController.show">``.
+
+    Real cars.com listing pages embed the vehicle's structured state as an
+    inline JSON blob in this script tag. Returns ``None`` if the tag is
+    absent or fails to parse — callers fall back to other paths.
+    """
+    tag = soup.find("script", attrs={"id": "CarsWeb.VehicleDetailController.show"})
+    if tag is None:
+        return None
+    raw = tag.string or tag.get_text() or ""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        data: Any = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.debug("failed to parse CarsWeb.VehicleDetailController.show JSON: %s", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _fields_from_cars_web_state(
+    state: dict[str, Any],
+) -> tuple[int | None, str | None, str | None, str | None, int | None, str | None, str | None]:
+    """Pull year/make/model/trim/mileage/vin/body_style out of the inline state.
+
+    Two sub-trees are probed in order: ``call_source_dni_metadata.dimensions``
+    (the richer one — list-of-strings for most fields) and
+    ``dealer_chat_metadata.carsData`` (the flatter one — scalars). We merge
+    them by always preferring the first non-empty value.
+    """
+    dimensions = _as_dict(_get_path(state, ["call_source_dni_metadata", "dimensions"]))
+    cars_data = _as_dict(_get_path(state, ["dealer_chat_metadata", "carsData"]))
+
+    year = _first_int(
+        [
+            _scalar_or_first(dimensions.get("year")),
+            cars_data.get("year"),
+        ]
+    )
+    make = _first_nonempty_str(
+        [
+            _scalar_or_first(dimensions.get("make")),
+            cars_data.get("make"),
+        ]
+    )
+    model = _first_nonempty_str(
+        [
+            _scalar_or_first(dimensions.get("model")),
+            cars_data.get("model"),
+        ]
+    )
+    # ``dimensions.trim`` is properly cased ("LX"); ``carsData.trim`` is
+    # often lowercase ("lx"). Prefer dimensions when present.
+    trim = _first_nonempty_str(
+        [
+            _scalar_or_first(dimensions.get("trim")),
+            cars_data.get("trim"),
+        ]
+    )
+    mileage = _first_int(
+        [
+            _scalar_or_first(dimensions.get("mileage")),
+            cars_data.get("mileage"),
+        ]
+    )
+    vin = _first_nonempty_str(
+        [
+            _scalar_or_first(dimensions.get("vin")),
+            cars_data.get("vin"),
+        ]
+    )
+    body_style = _first_nonempty_str(
+        [
+            _scalar_or_first(dimensions.get("bodyStyle")),
+            cars_data.get("bodystyle"),
+        ]
+    )
+    # ``bodystyle`` from carsData is lowercased ("sedan"); title-case it for
+    # consistency with the JSON-LD path (which yields "Sedan").
+    if body_style is not None:
+        body_style = body_style.title()
+    return year, make, model, trim, mileage, vin, body_style
+
+
+def _heuristic_from_title(
+    soup: BeautifulSoup,
+) -> tuple[int | None, str | None, str | None, str | None]:
+    """Year / make / model / trim from ``<title>`` or ``<h1 id="vehicle-title">``.
+
+    Used only when JSON-LD and the CarsWeb state both fail to produce a
+    field. Best-effort: extracts the first 4-digit year and treats the
+    next token as the make. We deliberately do NOT load a static make list
+    here — keeping it heuristic avoids drift between the parser and the
+    catalog.
+    """
+    text = ""
+    h1 = soup.find("h1", attrs={"id": "vehicle-title"})
+    if h1 is not None:
+        text = h1.get_text(strip=True)
+    if not text:
+        title = soup.find("title")
+        if title is not None:
+            text = title.get_text(strip=True)
+    if not text:
+        return None, None, None, None
+
+    year = parse_year_safe(text)
+    if year is None:
+        return None, None, None, None
+    # Tokenise the text after the year. Strip the trailing " | Cars.com"
+    # suffix and any leading "Used " / "New " / "Certified " marker.
+    stripped = re.sub(r"\s*\|\s*Cars\.com\s*$", "", text).strip()
+    tokens = stripped.split()
+    try:
+        year_idx = tokens.index(str(year))
+    except ValueError:
+        return year, None, None, None
+    after = tokens[year_idx + 1 :]
+    # The next token is the make, then the model. Trim is whatever follows
+    # before "For Sale" / "$..." / etc.
+    make = after[0] if len(after) >= 1 else None
+    model = after[1] if len(after) >= 2 else None
+    trim_tokens: list[str] = []
+    for token in after[2:]:
+        if token.lower() in {"for", "sale"} or token.startswith("$"):
+            break
+        trim_tokens.append(token)
+    trim = " ".join(trim_tokens).strip() or None
+    return year, make, model, trim
+
+
+def _extract_gallery_image_urls(soup: BeautifulSoup) -> list[str]:
+    """Collect ``<img slot="image" src=...>`` URLs from the photo gallery.
+
+    cars.com renders the vehicle photo gallery with custom elements that
+    hold the actual ``<img>`` tags via the ``slot="image"`` attribute.
+    Sources point at ``platform.cstatic-images.com`` for real photos
+    (versus stock article thumbnails on ``images.cars.com``). We keep
+    only ``platform.cstatic-images.com`` images to avoid pulling stock art.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in soup.find_all("img", attrs={"slot": "image"}):
+        src = tag.get("src")
+        if not isinstance(src, str):
+            continue
+        url = src.strip()
+        if not url or not url.startswith("https://"):
+            continue
+        if "platform.cstatic-images.com" not in url:
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+    return out
 
 
 def _find_next_page(soup: BeautifulSoup, *, base_url: str) -> str | None:
@@ -324,4 +559,56 @@ def _as_str(value: Any) -> str | None:
 def _as_int(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
+    return None
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` if it's a dict, else an empty dict."""
+    return value if isinstance(value, dict) else {}
+
+
+def _get_path(node: Any, path: list[str]) -> Any:
+    """Walk ``path`` through nested dicts. Return ``None`` on any miss."""
+    cur: Any = node
+    for key in path:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _scalar_or_first(value: Any) -> Any:
+    """If ``value`` is a list, return its first element; else return as-is.
+
+    cars.com's ``dimensions`` sub-tree wraps most fields in a single-element
+    list (``"make": ["Honda"]``). Unwrap it before further coercion.
+    """
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _first_nonempty_str(values: list[Any]) -> str | None:
+    """Return the first value in ``values`` that's a non-empty string."""
+    for value in values:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _first_int(values: list[Any]) -> int | None:
+    """Coerce values to int in order; return the first non-None coercion."""
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            parsed = parse_int_safe(value)
+            if parsed is not None:
+                return parsed
     return None
