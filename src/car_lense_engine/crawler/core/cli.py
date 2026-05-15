@@ -28,9 +28,11 @@ from .browser import (
     PlaywrightFetcher,
     WaitUntil,
 )
+from .curlcffi_fetcher import CurlCffiFetcher
 from .fetcher import Fetcher
 from .politeness import PolicyConfig
 from .registry import ParserRegistry
+from .routing import MultiFetcher, known_sources
 from .runner import run_crawler
 
 DEFAULT_DB = Path("db/crawl.sqlite")
@@ -136,6 +138,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--curl-cffi-sources",
+        type=str,
+        default="",
+        help=(
+            "comma-separated source identifiers to route through the curl_cffi "
+            "fetcher instead of Playwright (e.g. 'cars_com,hemmings'). Useful "
+            "for sites that detect headless-Chromium TLS fingerprints. "
+            "Default: empty (all sources use Playwright)."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -150,14 +163,33 @@ def _make_fetcher(
     wait_until: WaitUntil = DEFAULT_WAIT_UNTIL,
     settle_ms: int = DEFAULT_SETTLE_MS,
     navigation_timeout_ms: int = DEFAULT_NAVIGATION_TIMEOUT_MS,
+    curl_cffi_sources: tuple[str, ...] = (),
 ) -> Fetcher:
-    """Default fetcher factory; overridden in tests via :func:`main` argument."""
-    return PlaywrightFetcher(
+    """Default fetcher factory; overridden in tests via :func:`main` argument.
+
+    When ``curl_cffi_sources`` is non-empty, wraps the Playwright fetcher in a
+    :class:`MultiFetcher` that routes the named sources through a shared
+    :class:`CurlCffiFetcher` and leaves everything else on Playwright.
+    """
+    playwright = PlaywrightFetcher(
         headless=headless,
         wait_until=wait_until,
         settle_ms=settle_ms,
         navigation_timeout_ms=navigation_timeout_ms,
     )
+    if not curl_cffi_sources:
+        return playwright
+    curl = CurlCffiFetcher()
+    per_source: dict[str, Fetcher] = dict.fromkeys(curl_cffi_sources, curl)
+    return MultiFetcher(per_source=per_source, default=playwright)
+
+
+def _parse_curl_cffi_sources(raw: str) -> tuple[str, ...]:
+    """Split the ``--curl-cffi-sources`` CSV into a tuple of source IDs."""
+    if not raw or not raw.strip():
+        return ()
+    parts = [token.strip() for token in raw.split(",")]
+    return tuple(part for part in parts if part)
 
 
 def main(
@@ -195,6 +227,16 @@ def main(
         parser.error(
             "invalid delay window: --min-delay must be >= 0 and --max-delay must be >= --min-delay"
         )
+
+    curl_cffi_sources = _parse_curl_cffi_sources(args.curl_cffi_sources)
+    if curl_cffi_sources:
+        valid_sources = known_sources()
+        unknown = [s for s in curl_cffi_sources if s not in valid_sources]
+        if unknown:
+            parser.error(
+                f"--curl-cffi-sources: unknown source(s) {unknown}; "
+                f"valid choices are {sorted(valid_sources)}"
+            )
 
     db_path: Path = args.db
     if not db_path.exists():
@@ -242,6 +284,7 @@ def main(
             wait_until=args.wait_until,
             settle_ms=args.settle_ms,
             navigation_timeout_ms=args.navigation_timeout_ms,
+            curl_cffi_sources=curl_cffi_sources,
         )
         try:
             summary = run_crawler(

@@ -32,8 +32,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from car_lense_engine.crawler.core.browser import PlaywrightFetcher  # noqa: E402
+from car_lense_engine.crawler.core.curlcffi_fetcher import CurlCffiFetcher  # noqa: E402
 from car_lense_engine.crawler.core.politeness import PolicyConfig  # noqa: E402
 from car_lense_engine.crawler.core.registry import ParserRegistry  # noqa: E402
+from car_lense_engine.crawler.core.routing import MultiFetcher  # noqa: E402
 from car_lense_engine.crawler.core.runner import run_crawler  # noqa: E402
 from car_lense_engine.crawler.parsers import (  # noqa: E402
     AutoTraderParser,
@@ -305,11 +307,30 @@ def main() -> int:
         # JS, so we bump the wait/timeout for the smoke target list. Stay on
         # "domcontentloaded" (not "networkidle") to avoid the well-known
         # networkidle hangs on long-polling trackers.
-        fetcher = PlaywrightFetcher(
+        playwright_fetcher = PlaywrightFetcher(
             headless=True,
             wait_until="domcontentloaded",
             settle_ms=5000,
             navigation_timeout_ms=45_000,
+        )
+        # Route cars.com and Hemmings through curl_cffi: Playwright+stealth was
+        # 403'd by Cloudflare on both, almost certainly because of the headless
+        # Chromium TLS / JA3 fingerprint. curl_cffi (Chrome 131 impersonation)
+        # uses a real-browser TLS handshake at the request level and often
+        # clears that class of block.
+        #
+        # Keep Cars & Bids on Playwright: their listings are React-hydrated
+        # client-side, so a request-level fetcher would only see an empty
+        # shell. The C&B block is a separate problem (likely still Cloudflare,
+        # but solving it via curl_cffi would not help — the parser needs the
+        # post-hydration DOM).
+        curl_fetcher = CurlCffiFetcher()
+        fetcher = MultiFetcher(
+            per_source={
+                "cars_com": curl_fetcher,
+                "hemmings": curl_fetcher,
+            },
+            default=playwright_fetcher,
         )
 
         started = time.monotonic()
