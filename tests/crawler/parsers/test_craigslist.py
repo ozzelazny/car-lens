@@ -244,6 +244,29 @@ def test_parse_listing_extracts_vin_from_body_text() -> None:
     assert result.new_listing.vin == "2HGFC3B36LH700123"
 
 
+def test_parse_listing_handles_h2_postingtitle_without_inner_span() -> None:
+    """Regression: <h2 class="postingtitle"> with the title text directly inside
+    (no inner <span id="titletextonly">) must still yield a parsed listing."""
+    html = """
+    <html><body>
+      <h2 class="postingtitle">2020 Honda Civic Si</h2>
+      <p class="attrgroup">
+        <span>odometer: 45000</span>
+      </p>
+    </body></html>
+    """
+    parser = CraigslistParser()
+    result = parser.parse(html=html, url=LISTING_URL, kind="listing", hints={})
+
+    assert result.new_listing is not None
+    listing = result.new_listing
+    assert listing.year == 2020
+    assert listing.make == "Honda"
+    assert listing.model == "Civic Si"
+    assert listing.mileage == 45000
+    assert listing.listing_id == "craigslist:7123456789"
+
+
 def test_parse_listing_image_urls_extracted(load_fixture: _LoadFixture) -> None:
     html = load_fixture(LISTING_FIXTURE)
     parser = CraigslistParser()

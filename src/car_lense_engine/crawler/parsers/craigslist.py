@@ -384,8 +384,9 @@ def _extract_title(soup: BeautifulSoup) -> str | None:
 
     # Newer layout — full <h1 class="postingtitle"> contains a price prefix and
     # the title text as a child <span>. Prefer the inner title span if present,
-    # otherwise fall back to the h1's stripped text.
-    h1 = soup.find("h1", class_="postingtitle")
+    # otherwise fall back to the h1's stripped text. Craigslist sometimes
+    # emits <h2 class="postingtitle"> instead of <h1>, so match both.
+    h1 = soup.find(["h1", "h2"], class_="postingtitle")
     if isinstance(h1, Tag):
         inner = h1.find("span", id="titletextonly")
         if isinstance(inner, Tag):
