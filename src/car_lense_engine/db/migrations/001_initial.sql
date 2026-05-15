@@ -53,7 +53,14 @@ CREATE INDEX IF NOT EXISTS idx_images_phash
 
 CREATE TABLE IF NOT EXISTS crawl_queue (
     url             TEXT PRIMARY KEY,
-    source          TEXT NOT NULL,
+    source          TEXT NOT NULL CHECK (source IN (
+                        'cars_com',
+                        'autotrader',
+                        'craigslist',
+                        'bat',
+                        'hemmings',
+                        'carsandbids'
+                    )),
     kind            TEXT NOT NULL CHECK (kind IN ('search', 'listing', 'image')),
     target_year     INTEGER,
     target_make     TEXT,
