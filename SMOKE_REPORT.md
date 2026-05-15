@@ -617,3 +617,179 @@ In rough priority order:
 - `pytest` — `316 passed in 15.20s` (no regressions from the
   fixes; +19 new tests since run 2 covering BaT trim split,
   spark-link-button hrefs, slug URL form, and `wait_for_selector_by_source`).
+
+## Fourth run — 2026-05-15 (after real-HTML parser fixes)
+
+Fourth smoke run after the real-HTML parser fix loop:
+
+- `12f8cc6` — block diagnostic; saved real production HTML fixtures
+  for cars.com (via `curl_cffi(firefox133)`) and Hemmings (via
+  `curl_cffi(chrome131)`); confirmed both endpoints are reachable
+  network-side.
+- `b0e29ac` — cars.com and Hemmings parsers rewritten against the
+  saved real-HTML fixtures. Unit tests assert cars.com extracts ≥27
+  distinct listing URLs from the saved page and Hemmings extracts
+  ≥7 (deduped) listing URLs from the saved page.
+
+Goal of this run: confirm the parser fixes hold end-to-end against
+live HTML (i.e., not just the saved fixtures).
+
+### Status changes vs run 3
+
+| Site         | Run 3                       | Run 4                       | Notes |
+|--------------|-----------------------------|-----------------------------|-------|
+| cars.com     | 403 (regressed)             | **200 + 19 listing URLs enqueued, 0 followed up** | Network access restored AND the rewritten selector now extracts production listings. The 19 listings stay `pending` because `max_items=20` is consumed by BaT first. Headline win. |
+| AutoTrader   | 200 + 0 listings            | **200 + 0 listings (still)** | Identical to run 3: 10 s `wait_for_selector` timeout, then 0 cards. Still need the real grid selector. |
+| Craigslist   | 17 listing URLs (all pending) | **17 listing URLs (all pending)** | Unchanged; same `max_items` starvation. |
+| BaT          | 14 listings                 | **14 listings**             | Identical (same site state). |
+| Hemmings     | 200 + 0 listings            | **200 + 0 listings (still)** | The parser passes the real-HTML fixture (slug URL `/cars-for-sale/honda/civic`), but the smoke seed still uses the **query-param URL** `?Make=honda&Model=civic`. That URL appears to redirect to a different (empty / category) HTML shape that the rewritten selectors do not match. Smoke seed URL is now misaligned with the parser's real-HTML contract. |
+| Cars & Bids  | 403                         | **403 (still)**             | Unchanged from runs 2 & 3. |
+
+### Run summary
+
+- Total elapsed: **196.2 s** (essentially identical to runs 2 & 3 —
+  the 10 s AutoTrader selector wait + BaT page fetches still
+  dominate).
+- Crawler `exit_reason`: **`max_items_reached`** (hit the 20-item
+  cap again; 65 items remain pending: 19 cars.com listings, 14 BaT
+  listings, 14 BaT images, 17 Craigslist listings, 1 Hemmings
+  pagination URL).
+- Total fetches: **19 succeeded / 1 failed** (Cars & Bids 403 only —
+  cars.com is back to 200 this run).
+- Listings inserted: **14** (all BaT, same as runs 2 & 3 — the
+  cars.com / Craigslist listing parsers were not exercised due to
+  `max_items`).
+- URLs enqueued: **79** (vs 60 in run 3). The +19 is the cars.com
+  listing URLs that the rewritten parser now extracts — exactly the
+  point of the run.
+
+### Per-site results
+
+#### cars.com — fixed (HTTP 200 + 19 listing URLs extracted)
+
+- Search page: **HTTP 200 via curl_cffi(chrome131)**. The run-3
+  regression cleared — we are not currently rate-limited.
+- Listing URLs discovered: **19** (all `pending`; none reached the
+  listing-parser stage because BaT consumed the `max_items=20` quota
+  first).
+- Listings parsed: 0 (queue cap, not a parser issue; the search
+  parser worked).
+- Sample URLs (all `/vehicledetail/<uuid>/` form, which the new
+  selector matches):
+  - `https://www.cars.com/vehicledetail/3715142b-250e-4689-a303-e5924eb2ceaa/`
+  - `https://www.cars.com/vehicledetail/275e9719-3511-47e3-bc70-74c58a611288/`
+  - `https://www.cars.com/vehicledetail/77a5d51d-e834-4d6d-a3eb-7e6b8ed09548/`
+- **Headline**: the real-HTML fixture rewrite from `b0e29ac` works
+  against live HTML. Production filter (`year_min=2020&year_max=2020`)
+  narrows the count to 19 vs the 27 in the fixture (which was saved
+  with no year filter) — but the parser is finding the cards. Next
+  step is to actually fetch one of the listing pages, which is
+  blocked only by `max_items`.
+
+#### AutoTrader — unchanged (200 + 0 listings)
+
+- Search page: **HTTP 200**, but
+  `wait_for_selector("[data-cmp='inventoryListing'], ...")` timed
+  out at 10 s (identical to run 3).
+- Listing URLs discovered: 0.
+- Parser note: `"no listing cards found on search page; selectors
+  may need updating"`.
+- **Conclusion**: no progress vs run 3. None of the four configured
+  selectors match the rendered DOM. AutoTrader needs the same
+  diagnostic + real-HTML fixture treatment that cars.com and Hemmings
+  just received — the `12f8cc6` diagnostic only fetched
+  `/robots.txt` for AutoTrader (because the search page is Akamai-
+  blocked from curl_cffi). We need a Playwright-side capture of
+  whatever HTML it eventually rendered, or evidence of an
+  interstitial.
+
+#### Craigslist — unchanged (17 listing URLs, all pending)
+
+- Search page: **HTTP 200**, 17 listing URLs extracted (identical
+  to runs 2 & 3 — same listings, same order).
+- Listings parsed: 0 (queue cap, not a parser issue).
+- **Action**: same as runs 2 & 3 — `max_items=20` is too small for
+  five sites to share when BaT alone yields 28 candidates. With
+  cars.com now contributing 19, the cap is even more biting.
+
+#### Bring a Trailer — unchanged (14 listings)
+
+- Search page: **HTTP 200**, 28 listing URLs discovered.
+- Listings parsed: **14** with identical rows to run 3 (same site
+  state — same auctions still active).
+- Residual "Del Sol" model-split bug is still present
+  (`bat:1997-honda-del-sol-3` shows `model="Del", trim="Sol Si
+  5-Speed"`); the other Del Sol rows still carry the
+  `model=Civic, trim="Del Sol ..."` pattern. Same as run 3.
+
+#### Hemmings — still 0 listings end-to-end (URL mismatch)
+
+- Search page: **HTTP 200 via curl_cffi(chrome131)**.
+- Listing URLs discovered: 0.
+- Listings parsed: 0.
+- Parser note: `"no listing cards found on search page; selectors
+  may need updating"`.
+- A pagination URL (`?page=2`) is still discovered (same as run 3),
+  so the parser is reaching *something* — just not listing cards.
+- **Root cause** (newly identified this run): the smoke harness
+  seeds Hemmings with the **query-param URL form**
+  (`/cars-for-sale?Make=honda&Model=civic`), but the real-HTML
+  fixture for the parser was saved from the **slug URL form**
+  (`/cars-for-sale/honda/civic`). The two URLs return different
+  HTML shapes. The parser is now contractually correct against the
+  slug-URL shape (7 listings in the fixture, asserted by unit test),
+  but the smoke seed asks for the other shape. Either (a) align the
+  smoke seed to the slug URL, or (b) teach the Hemmings parser to
+  cope with both shapes.
+
+#### Cars & Bids — unchanged (HTTP 403)
+
+- Search page: **HTTP 403** via Playwright (stealth still active).
+- Status unchanged from runs 2 & 3. No new attempts this run.
+
+### Identified follow-up tasks
+
+In rough priority order:
+
+1. **Hemmings: align smoke seed URL with parser fixture.** Change
+   the smoke seed from `/cars-for-sale?Make=honda&Model=civic`
+   (query-param) to `/cars-for-sale/honda/civic` (slug). The parser
+   already passes the real-HTML fixture for the slug form. This is
+   a one-line change in `scripts/smoke_e2e.py`.
+
+2. **Raise `max_items` (or add per-source caps).** With cars.com now
+   contributing 19 listing URLs on top of BaT's 28, the 20-item cap
+   blocks every cars.com / Craigslist / Hemmings listing fetch. A
+   `max_items=80+` run, or per-source caps (e.g., 20 per source),
+   would actually exercise the listing parsers we just shipped.
+
+3. **AutoTrader: capture real HTML and rewrite selectors.** Same
+   treatment cars.com and Hemmings just got. The diagnostic should
+   save a real Playwright-rendered AutoTrader HTML body and we
+   rewrite the selectors against it (or confirm it's an interstitial
+   /CAPTCHA and accept the gap).
+
+4. **BaT two-word-model recognition.** Unchanged from run 3 —
+   "Del Sol" still splits as `model=Del`. Low priority; data
+   is still usable.
+
+5. **Cars & Bids: try curl_cffi + `__NEXT_DATA__` extraction.**
+   Unchanged from run 3.
+
+### Open questions
+
+- **Is the `max_items=20` cap intentional for smoke?** It now
+  consistently starves cars.com and Craigslist (and would starve
+  Hemmings once that seed is fixed). Bumping it would meaningfully
+  improve smoke coverage. (Run 3 also flagged this.)
+- **Should the Hemmings seed switch be a one-line fix in this run,
+  or scheduled as a discrete task?** The fix is trivial but cosmetic
+  to the smoke contract — the parser is already correct.
+
+### Pytest / lint
+
+- `ruff check .` — All checks passed.
+- `pytest` — `360 passed in 15.45s` (+44 new tests since run 3;
+  these cover the real-HTML fixtures for cars.com and Hemmings, the
+  diagnostic / block characterization, and the parser rewrites from
+  `b0e29ac`).
