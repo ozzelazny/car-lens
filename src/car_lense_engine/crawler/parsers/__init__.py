@@ -21,10 +21,12 @@ from .common import (
     parse_year_safe,
     sha256_text,
 )
+from .craigslist import CraigslistParser
 
 __all__ = [
     "AutoTraderParser",
     "CarsComParser",
+    "CraigslistParser",
     "DiscoveredUrl",
     "ParseResult",
     "ParsedListing",
