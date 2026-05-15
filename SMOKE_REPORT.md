@@ -186,3 +186,205 @@ Coder→Linter→Reviewer→Tester loop.
   do we want it scriptable (e.g., read seeds from a YAML / catalog
   query) so it can be re-run against future search-query updates? Out
   of scope for this commit but a likely follow-up.
+
+## Second run — 2026-05-15 (after fixes)
+
+Second smoke run after three follow-up fixes:
+
+- `2b0304f` — BaT parser now extracts make/model from JSON-LD `name`.
+- `d45c480` — `PlaywrightFetcher` gained configurable `wait_until` /
+  `settle_ms` / `navigation_timeout_ms`; smoke harness uses
+  `settle_ms=5000`, `navigation_timeout_ms=45000`,
+  `wait_until="domcontentloaded"`.
+- `b4aa9e3` — `CurlCffiFetcher` + per-source `MultiFetcher`; smoke
+  harness routes `cars_com` and `hemmings` through curl_cffi (Chrome
+  131 impersonation) to clear Cloudflare; everything else stays on
+  Playwright.
+
+### Status changes vs first run
+
+| Site         | First run    | Second run                | Notes |
+|--------------|--------------|---------------------------|-------|
+| cars.com     | 403          | 200 (curl_cffi), 0 parsed | curl_cffi cleared block; parser misses path-relative hrefs in non-`<a>` elements |
+| AutoTrader   | unhydrated   | unhydrated (still)        | `settle_ms=5000` not enough; still 0 hrefs |
+| Craigslist   | inconsistent | 17 listing URLs found     | `settle_ms=5000` fixed the hydration variance |
+| BaT          | works, all Civic | works, varied make/model | name-parse fix delivered: CRX, Del Sol, Civic Type R now distinct |
+| Hemmings     | 403          | 200 (curl_cffi), redirected to category page | curl_cffi cleared block; site dropped `?Make=&Model=` query on redirect |
+| Cars & Bids  | 403          | 403 (still)               | Unchanged — still Playwright; Cloudflare still blocks |
+
+### Run summary
+
+- Total elapsed: **186.4 s** (vs 137.2 s in run 1 — slower due to the
+  longer Playwright settle and Hemmings now successfully fetching).
+- Crawler `exit_reason`: **`max_items_reached`** (hit the 20-item cap
+  again; 46 items remain pending: 14 BaT listings, 14 BaT images, 17
+  Craigslist listings, 1 Hemmings pagination URL).
+- Total fetches: **19 succeeded / 1 failed** (Cars & Bids was the only
+  failure; first run had 3 failures).
+- Listings inserted: **14** (all BaT — same count as first run, but
+  this run hit `max_items` mid-queue, with Craigslist listings still
+  pending).
+- URLs enqueued: **60** (vs 42 first run — gain comes from the 17 new
+  Craigslist listings and 1 Hemmings pagination URL).
+
+### Per-site results
+
+#### cars.com — curl_cffi cleared the 403, parser hit a different bug
+- Search page: **HTTP 200 via curl_cffi** (1.02 MB of real HTML —
+  `<title>` reads "New and Used 2020 Honda Civic for Sale Near San
+  Mateo, CA | Cars.com"; 33 `vehicle-card` markers, 38
+  `data-listing-id` markers, 95 occurrences of `/vehicledetail/` in
+  the source).
+- Listing URLs discovered: **0** (parser bug — see below)
+- Listings parsed: 0
+- Image URLs enqueued: 0
+- **Headline**: curl_cffi cleared the Cloudflare block. The TLS
+  fingerprint fix works against cars.com.
+- **New bug**: the parser's `_LISTING_HREF_RE = ^/vehicledetail/[^/]+/?$`
+  expects path-relative hrefs, but BeautifulSoup yields hrefs from
+  `<a>` tags only, and those are now **absolute URLs**
+  (`https://www.cars.com/vehicledetail/...`). The path-relative
+  `/vehicledetail/...` versions in the source live in custom
+  `<spark-link-button>` / `<spark-button>` elements that
+  `soup.find_all("a", href=True)` doesn't pick up. Fix options:
+  (a) broaden the selector to include `spark-link-button`, or
+  (b) loosen the regex to match the absolute form, or
+  (c) match on URL substring `/vehicledetail/` regardless of element
+  tag.
+
+#### AutoTrader — unhydrated shell, settle_ms=5000 didn't help
+- Search page: **HTTP 200**, parser logged the same "no listing cards
+  found on search page; selectors may need updating" note.
+- Listing URLs discovered: 0
+- Listings parsed: 0
+- **Conclusion**: bumping `settle_ms` from 1500 to 5000 was
+  insufficient. AutoTrader still serves an interstitial / unhydrated
+  shell to headless Chromium. Next escalation: try `networkidle`, or
+  `wait_for_selector` on a specific listing-grid marker, or route
+  AutoTrader through curl_cffi the way we did cars.com.
+
+#### Craigslist — settle_ms=5000 fixed the hydration variance
+- Search page: **HTTP 200**, parser extracted 17 listing URLs.
+- Listing URLs discovered: **17** (all `pending` — the run hit
+  `max_items` before processing them).
+- Listings parsed: 0 (queue cap, not a parser issue).
+- **Headline**: the longer settle delivered consistent hydration.
+  First-run variance (155 KB vs 35 KB depending on timing) is gone.
+  Listing extraction now works; we just need more headroom to parse
+  them.
+
+#### Bring a Trailer — name-parse fix delivered varied makes/models
+- Search page: **HTTP 200**, 28 listing URLs discovered (same as run 1).
+- Listings parsed: **14** with **distinct models**:
+
+| listing_id                            | year | make  | model                  |
+|---------------------------------------|------|-------|------------------------|
+| bat:1986-honda-civic-22               | 1986 | Honda | Civic Si               |
+| bat:1988-honda-crx-si-33              | 1988 | Honda | Crx Si 5-Speed         |
+| bat:1989-honda-crx-si-48              | 1989 | Honda | Crx Si 5-Speed         |
+| bat:1991-honda-crx-89                 | 1991 | Honda | Crx 1.6I-Vt 5-Speed    |
+| bat:1991-honda-crx-hf-4               | 1991 | Honda | Crx Hf 5-Speed         |
+| bat:1991-honda-crx-si-14              | 1991 | Honda | Crx Si 5-Speed         |
+| bat:1993-honda-civic-del-sol-37       | 1993 | Honda | Civic Del Sol Si       |
+| bat:1993-honda-civic-del-sol-40       | 1993 | Honda | Civic Del Sol S        |
+| bat:1994-honda-civic-del-sol-5        | 1994 | Honda | Civic Del Sol S        |
+| bat:1995-honda-civic-5                | 1995 | Honda | Civic Cx Hatchback 5-Speed |
+| bat:1997-honda-del-sol-3              | 1997 | Honda | Del Sol Si 5-Speed     |
+| bat:2000-honda-civic-81               | 2000 | Honda | Civic Type Rx          |
+| bat:2018-honda-civic-type-r-touring-5 | 2018 | Honda | Civic Type R Touring   |
+| bat:2018-honda-civic-type-r-touring-7 | 2018 | Honda | Civic Type R Touring   |
+
+- **Headline**: the JSON-LD `name`-parse fix worked. We no longer
+  collapse every BaT listing to "Honda Civic". CRX (5 listings),
+  Del Sol (4 listings), Civic Si (1), Civic Type R (2), Civic Type Rx
+  (1), Civic CX Hatchback (1) are now distinct.
+- **Known residual**: `model` is greedy — it absorbs trim and
+  transmission tokens too (e.g. `Crx Si 5-Speed`, `Civic Cx Hatchback
+  5-Speed`, `Civic Del Sol Si`). The `trim` column is still `None`
+  for all rows. The name parser's token loop should stop earlier
+  (likely at the first transmission / configuration token like
+  "5-Speed", "Manual", "Coupe", "Hatchback") and stash the rest in
+  `trim`. Lower-priority follow-up — model is at least correct in its
+  prefix and the dataset is now usable for non-Civic targets.
+
+#### Hemmings — curl_cffi cleared the 403, but Hemmings dropped the query
+- Search page: **HTTP 200 via curl_cffi**, but final URL is
+  `https://www.hemmings.com/classifieds/cars-for-sale` — the
+  `?Make=honda&Model=civic` query params were stripped on a redirect.
+  Result: 506 KB of HTML, but it's a generic "browse by category"
+  landing page with 0 numeric-id listing hrefs.
+- Listing URLs discovered: 0
+- Listings parsed: 0
+- **Status**: half-win — Cloudflare no longer blocks us, but Hemmings
+  appears to redirect `?Make=...&Model=...` to the bare category page
+  when the request doesn't carry the right cookies / session state.
+  The parser DID find a pagination URL (`?page=2`), which is why
+  there's a stray `pending` Hemmings search row in the queue.
+- **Fix options**: (a) build the query URL differently (Hemmings may
+  use a slug-style path like
+  `/classifieds/cars-for-sale/honda/civic`), (b) follow up on the
+  bare `cars-for-sale?page=2` listing-card extraction (it's a
+  category page that may still have car cards).
+
+#### Cars & Bids — still 403, unchanged
+- Search page: **HTTP 403** (same as run 1; still on Playwright).
+- This was an explicit non-goal of run 2 (the fix routed only
+  cars.com and hemmings through curl_cffi). Next iteration could try
+  routing Cars & Bids through curl_cffi too, but Cars & Bids ships a
+  React SPA — even a clean fetch may give a near-empty shell.
+
+### Most surprising finding
+
+**cars.com curl_cffi worked, but the parser couldn't see the hrefs
+because they live in `<spark-link-button>` custom elements, not
+`<a>` tags.** That's a brand-new failure mode we didn't anticipate in
+run 1 (when 403s hid it). The Cloudflare bypass exposed a
+selector-incompleteness bug under it. cars.com is fixable in one
+small parser PR.
+
+The BaT fix overshoot — `model` absorbing trim words like
+"5-Speed" / "Hatchback" — is a close runner-up. Annoying but the
+data is still usable.
+
+### Updated follow-up tasks
+
+In rough priority order (replaces / amends list 1-8 above):
+
+1. **cars.com parser: broaden listing-href selector.** Don't restrict
+   to `<a href="...">`; match any element with an href / link attr
+   whose value contains `/vehicledetail/`, OR loosen the regex to
+   match both relative and absolute. The Cloudflare gate is solved;
+   the parser is now the limiting factor.
+
+2. **BaT name-parse: stop the model run at transmission /
+   configuration tokens.** Add stop-words like `5-Speed`, `6-Speed`,
+   `Manual`, `Automatic`, `Coupe`, `Hatchback`, `Sedan`, `Convertible`
+   to the existing termination set, and route the leftover tail into
+   `trim`. Low risk — covered by the existing BaT parser tests.
+
+3. **Hemmings query-form rewrite.** The `?Make=honda&Model=civic`
+   form redirects to the bare category page. Try the slug form
+   (`/classifieds/cars-for-sale/honda/civic` or similar) instead;
+   inspect what the site's own search UI actually links to.
+
+4. **AutoTrader: escalate hydration fix.** `settle_ms=5000` didn't
+   help. Try `wait_until="networkidle"`, `wait_for_selector` on a
+   specific marker, or route through curl_cffi.
+
+5. **Craigslist listing parsing.** Search now yields 17 URLs.
+   Pending queue items prove fetch works; need a larger `max_items`
+   to actually exercise the listing parser. Re-run with
+   `max_items=40` to test.
+
+6. **Cars & Bids fallback.** Try curl_cffi routing (would need to
+   confirm the parser can work on the unhydrated shell, since C&B is
+   a SPA).
+
+7. Existing items 7 (BaT mileage/VIN from prose) and the design
+   questions remain unchanged.
+
+### Pytest / lint
+
+- `ruff check .` — All checks passed.
+- `pytest -v` — `297 passed in 14.63s` (no regressions from the
+  fixes).
