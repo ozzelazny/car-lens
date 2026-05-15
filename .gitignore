@@ -11,6 +11,7 @@ dist/
 build/
 .venv/
 venv/
+uv.lock
 
 # IDE
 .vscode/
