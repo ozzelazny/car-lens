@@ -100,7 +100,7 @@ def test_walker_recurses_sitemapindex() -> None:
             ),
         }
     )
-    walker = SitemapWalker(fetcher=fetcher)
+    walker = SitemapWalker(fetcher=fetcher, min_delay_seconds=0)
     result = list(walker.walk("https://example.com/sitemap.xml"))
     # Depth-first, in-document order: a1, a2 (from sitemap_a), then b1, b2.
     assert result == [
@@ -133,7 +133,7 @@ def test_walker_respects_max_depth() -> None:
             "https://e.test/level3.xml": _urlset(["https://e.test/deep"]),
         }
     )
-    walker = SitemapWalker(fetcher=fetcher, max_depth=2)
+    walker = SitemapWalker(fetcher=fetcher, max_depth=2, min_delay_seconds=0)
     result = list(walker.walk("https://e.test/root.xml"))
     # The walker refuses to recurse into level3 (which would be depth=3).
     # Confirms the leaf at level 3 is never reached.
@@ -152,7 +152,7 @@ def test_walker_respects_max_depth() -> None:
             "https://e.test/level3.xml": _urlset(["https://e.test/deep"]),
         }
     )
-    walker2 = SitemapWalker(fetcher=fetcher2, max_depth=3)
+    walker2 = SitemapWalker(fetcher=fetcher2, max_depth=3, min_delay_seconds=0)
     result2 = list(walker2.walk("https://e.test/root.xml"))
     assert result2 == ["https://e.test/deep"]
 
@@ -230,7 +230,7 @@ def test_walker_skips_malformed_child_sitemap_but_continues_siblings() -> None:
             "https://e.test/good.xml": _urlset(["https://e.test/ok"]),
         }
     )
-    walker = SitemapWalker(fetcher=fetcher)
+    walker = SitemapWalker(fetcher=fetcher, min_delay_seconds=0)
     result = list(walker.walk("https://e.test/root.xml"))
     assert result == ["https://e.test/ok"]
 
@@ -286,7 +286,7 @@ def test_walker_dedupes_cycle_in_sitemap_tree() -> None:
             "https://e.test/child.xml": _sitemapindex(["https://e.test/root.xml"]),
         }
     )
-    walker = SitemapWalker(fetcher=fetcher)
+    walker = SitemapWalker(fetcher=fetcher, min_delay_seconds=0)
     result = list(walker.walk("https://e.test/root.xml"))
     assert result == []
     # Each URL fetched exactly once.
@@ -294,6 +294,97 @@ def test_walker_dedupes_cycle_in_sitemap_tree() -> None:
         "https://e.test/child.xml",
         "https://e.test/root.xml",
     ]
+
+
+def test_walker_sleeps_between_fetches() -> None:
+    """``min_delay_seconds`` inserts a sleep before every fetch except the first.
+
+    Walks a sitemapindex pointing to 2 child sitemaps: 3 fetches total
+    (root + 2 children) -> 2 sleeps (first fetch has no preceding sleep).
+    """
+    fetcher = _FakeFetcher(
+        {
+            "https://example.com/sitemap.xml": _sitemapindex(
+                [
+                    "https://example.com/sitemap_a.xml",
+                    "https://example.com/sitemap_b.xml",
+                ]
+            ),
+            "https://example.com/sitemap_a.xml": _urlset(["https://example.com/a1"]),
+            "https://example.com/sitemap_b.xml": _urlset(["https://example.com/b1"]),
+        }
+    )
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    walker = SitemapWalker(
+        fetcher=fetcher,
+        min_delay_seconds=2.0,
+        sleep_fn=fake_sleep,
+    )
+    result = list(walker.walk("https://example.com/sitemap.xml"))
+    assert result == ["https://example.com/a1", "https://example.com/b1"]
+    # 3 fetches, 2 sleeps (one fewer than fetch count, all at the configured delay).
+    assert sleep_calls == [2.0, 2.0]
+    assert len(sleep_calls) == len(fetcher.calls) - 1
+
+
+def test_walker_zero_delay_skips_sleep() -> None:
+    """``min_delay_seconds=0`` skips the sleep entirely (no sleep_fn calls)."""
+    fetcher = _FakeFetcher(
+        {
+            "https://example.com/sitemap.xml": _sitemapindex(
+                [
+                    "https://example.com/sitemap_a.xml",
+                    "https://example.com/sitemap_b.xml",
+                ]
+            ),
+            "https://example.com/sitemap_a.xml": _urlset(["https://example.com/a1"]),
+            "https://example.com/sitemap_b.xml": _urlset(["https://example.com/b1"]),
+        }
+    )
+    sleep_calls: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    walker = SitemapWalker(
+        fetcher=fetcher,
+        min_delay_seconds=0,
+        sleep_fn=fake_sleep,
+    )
+    list(walker.walk("https://example.com/sitemap.xml"))
+    assert sleep_calls == []
+
+
+def test_walker_rejects_negative_min_delay() -> None:
+    """Negative ``min_delay_seconds`` must raise ValueError at construction."""
+
+    class _Stub:
+        def fetch(self, url: str) -> Any:  # pragma: no cover - unused
+            raise NotImplementedError
+
+        def close(self) -> None:  # pragma: no cover - unused
+            pass
+
+    with pytest.raises(ValueError, match="min_delay_seconds"):
+        SitemapWalker(fetcher=_Stub(), min_delay_seconds=-1.0)
+
+
+def test_walker_rejects_non_numeric_min_delay() -> None:
+    """Non-numeric ``min_delay_seconds`` must raise ValueError at construction."""
+
+    class _Stub:
+        def fetch(self, url: str) -> Any:  # pragma: no cover - unused
+            raise NotImplementedError
+
+        def close(self) -> None:  # pragma: no cover - unused
+            pass
+
+    with pytest.raises(ValueError, match="min_delay_seconds"):
+        SitemapWalker(fetcher=_Stub(), min_delay_seconds="fast")  # type: ignore[arg-type]
 
 
 def test_walker_max_urls_cap_across_sitemapindex() -> None:
@@ -310,7 +401,7 @@ def test_walker_max_urls_cap_across_sitemapindex() -> None:
             "https://e.test/sm2.xml": _urlset([f"https://e.test/b/{i}" for i in range(5)]),
         }
     )
-    walker = SitemapWalker(fetcher=fetcher, max_urls=3)
+    walker = SitemapWalker(fetcher=fetcher, max_urls=3, min_delay_seconds=0)
     result = list(walker.walk("https://e.test/root.xml"))
     assert len(result) == 3
     # First three from sm1 (depth-first).

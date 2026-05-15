@@ -41,6 +41,32 @@ def test_is_autotrader_listing_accepts_vehicledetails_with_6plus_digit_id() -> N
     )
 
 
+def test_is_autotrader_listing_slug_embedded_id() -> None:
+    """AutoTrader's hyphen-separated slug-embedded id shape must match.
+
+    The parser docs both ``/vehicledetails/{slug}/{id}`` and
+    ``/vehicledetails/{slug}-{id}`` as canonical listing URL shapes. The
+    seeder filter previously rejected the hyphen form because it required
+    a literal ``/`` before the trailing digit run.
+    """
+    assert (
+        is_autotrader_listing(
+            "https://www.autotrader.com/cars-for-sale/vehicledetails/2020-honda-civic-12345678"
+        )
+        is True
+    )
+
+
+def test_is_autotrader_listing_slash_separated_id() -> None:
+    """AutoTrader's slash-separated id shape must continue to match."""
+    assert (
+        is_autotrader_listing(
+            "https://www.autotrader.com/cars-for-sale/vehicledetails/2020-honda-civic/12345678"
+        )
+        is True
+    )
+
+
 def test_is_autotrader_listing_rejects_non_listing_paths() -> None:
     # Category page (no numeric id).
     assert not is_autotrader_listing("https://www.autotrader.com/cars-for-sale/honda/civic")
@@ -310,7 +336,7 @@ def test_walker_and_seeder_compose_against_autotrader_shape(
         ),
     }
     fetcher = _FakeFetcher(responses)
-    walker = SitemapWalker(fetcher=fetcher)
+    walker = SitemapWalker(fetcher=fetcher, min_delay_seconds=0)
     stats = seed_queue_from_sitemap(db, source="autotrader", walker=walker)
     # 3 URLs walked from the child urlset, 2 matched the listing filter.
     assert stats.walked == 3

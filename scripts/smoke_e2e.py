@@ -354,7 +354,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.include_sitemap:
             sitemap_fetcher = CurlCffiFetcher()
             try:
-                walker = SitemapWalker(fetcher=sitemap_fetcher)
+                # Match the crawler's PolicyConfig.min_delay_seconds=3.0 so sub-sitemap
+                # fetches stay polite against AutoTrader's Akamai surface.
+                walker = SitemapWalker(fetcher=sitemap_fetcher, min_delay_seconds=3.0)
                 for source in ("autotrader", "carsandbids"):
                     sm_stats = seed_queue_from_sitemap(
                         conn,

@@ -47,10 +47,15 @@ recurses indexes transparently.
 """
 
 
-# AutoTrader listings live under ``/cars-for-sale/vehicledetails/.../<6+ digit id>``
-# per ``urls.autotrader`` and the existing parser. The ID lives at the tail of
-# the path; we accept an optional trailing slash.
-_AUTOTRADER_PATH_RE = re.compile(r"/\d{6,}/?$")
+# AutoTrader listings live under ``/cars-for-sale/vehicledetails/...`` and end
+# in a 6+ digit numeric id at the tail of the path. AutoTrader documents two
+# URL shapes (see ``parsers/autotrader.py`` docstring):
+#   * ``/vehicledetails/{slug}/{id}``   — slash-separated id
+#   * ``/vehicledetails/{slug}-{id}``   — slug-embedded id (hyphen separator)
+# The parser handles both via ``re.search`` on ``(\d{6,})/?$``; mirror that here
+# by accepting either separator before the digit run. An optional trailing
+# slash is tolerated.
+_AUTOTRADER_PATH_RE = re.compile(r"(?:[/-])\d{6,}/?$")
 
 
 def is_autotrader_listing(url: str) -> bool:

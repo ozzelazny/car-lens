@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import gzip
 import logging
+import math
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 
 from defusedxml import ElementTree as DefusedET
 
@@ -113,14 +115,28 @@ class SitemapWalker:
         fetcher: Fetcher,
         max_depth: int = 3,
         max_urls: int = 10_000,
+        min_delay_seconds: float = 1.0,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         if max_depth < 0:
             raise ValueError(f"max_depth must be >= 0, got {max_depth!r}")
         if max_urls <= 0:
             raise ValueError(f"max_urls must be > 0, got {max_urls!r}")
+        # ``min_delay_seconds`` paces sub-sitemap fetches so a tree that
+        # expands to many children (AutoTrader's sitemap index does) doesn't
+        # issue back-to-back requests against an Akamai surface. ``0`` is a
+        # legitimate value (tests use it for instant runs).
+        if not isinstance(min_delay_seconds, (int, float)) or isinstance(min_delay_seconds, bool):
+            raise ValueError(
+                f"min_delay_seconds must be a number, got {type(min_delay_seconds).__name__}"
+            )
+        if math.isnan(min_delay_seconds) or min_delay_seconds < 0:
+            raise ValueError(f"min_delay_seconds must be >= 0, got {min_delay_seconds!r}")
         self._fetcher = fetcher
         self._max_depth = max_depth
         self._max_urls = max_urls
+        self._min_delay_seconds = float(min_delay_seconds)
+        self._sleep_fn: Callable[[float], None] = sleep_fn if sleep_fn is not None else time.sleep
 
     # ------------------------------------------------------------ public API
 
@@ -137,7 +153,17 @@ class SitemapWalker:
         """
         yielded = [0]  # mutable container so the helper can update it
         seen_sitemaps: set[str] = set()
-        yield from self._walk(root_url, depth=0, yielded=yielded, seen=seen_sitemaps)
+        # ``fetched`` counts *successful entry into the fetch path* for each
+        # new URL. The walker sleeps ``min_delay_seconds`` before every fetch
+        # except the very first one — no point sleeping before the root.
+        fetched = [0]
+        yield from self._walk(
+            root_url,
+            depth=0,
+            yielded=yielded,
+            seen=seen_sitemaps,
+            fetched=fetched,
+        )
 
     # ------------------------------------------------------------- internals
 
@@ -148,6 +174,7 @@ class SitemapWalker:
         depth: int,
         yielded: list[int],
         seen: set[str],
+        fetched: list[int],
     ) -> Iterator[str]:
         if yielded[0] >= self._max_urls:
             return
@@ -155,6 +182,13 @@ class SitemapWalker:
             logger.debug("sitemap walker: skipping already-visited sitemap %s", url)
             return
         seen.add(url)
+
+        # Sleep before every fetch except the first. ``min_delay_seconds == 0``
+        # is a legitimate (test-only) configuration — skip the sleep entirely
+        # in that case to keep the call count clean.
+        if fetched[0] > 0 and self._min_delay_seconds > 0:
+            self._sleep_fn(self._min_delay_seconds)
+        fetched[0] += 1
 
         try:
             page = self._fetcher.fetch(url)
@@ -178,7 +212,9 @@ class SitemapWalker:
 
         root_tag = _strip_namespace(root.tag)
         if _SITEMAPINDEX_TAG_RE.search(root_tag):
-            yield from self._walk_index(root, depth=depth, yielded=yielded, seen=seen)
+            yield from self._walk_index(
+                root, depth=depth, yielded=yielded, seen=seen, fetched=fetched
+            )
         elif _URLSET_TAG_RE.search(root_tag):
             yield from self._walk_urlset(root, yielded=yielded)
         else:
@@ -196,6 +232,7 @@ class SitemapWalker:
         depth: int,
         yielded: list[int],
         seen: set[str],
+        fetched: list[int],
     ) -> Iterator[str]:
         # ``root`` is an ElementTree Element; iterate children that are
         # ``<sitemap>`` and recurse into their ``<loc>``.
@@ -214,7 +251,13 @@ class SitemapWalker:
                     loc,
                 )
                 continue
-            yield from self._walk(loc, depth=depth + 1, yielded=yielded, seen=seen)
+            yield from self._walk(
+                loc,
+                depth=depth + 1,
+                yielded=yielded,
+                seen=seen,
+                fetched=fetched,
+            )
             if yielded[0] >= self._max_urls:
                 return
 
