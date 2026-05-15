@@ -36,33 +36,50 @@ logger = logging.getLogger(__name__)
 
 
 SITEMAP_ROOTS: dict[str, str] = {
-    "autotrader": "https://www.autotrader.com/sitemap.xml",
-    "carsandbids": "https://carsandbids.com/cab-sitemap/xml",
+    # AutoTrader's top-level ``sitemap.xml`` is an index whose first six child
+    # sitemaps are static-taxonomy / marketing / dealer content (the 2026-05-15
+    # diagnostic confirmed 0 vehicle URLs in the first 50 walked from there).
+    # The real vehicle URLs live under ``marketplace/sitemaps/inventory.xml``
+    # — point the seeder directly at that 39 MB urlset to skip the wasted
+    # 6-branch BFS.
+    "autotrader": "https://www.autotrader.com/marketplace/sitemaps/inventory.xml",
+    # Cars & Bids' robots.txt advertises the sitemap at
+    # ``/cab-sitemap/xml_sitemap.xml`` (with ``_sitemap.xml`` suffix). The
+    # previously used ``/cab-sitemap/xml`` returned an HTML SPA shell rather
+    # than XML.
+    "carsandbids": "https://carsandbids.com/cab-sitemap/xml_sitemap.xml",
 }
 """Root sitemap URL per source identifier.
 
-AutoTrader's ``sitemap.xml`` is a sitemap *index* (~696 bytes pointing to
-sub-sitemaps); Cars & Bids' ``cab-sitemap/xml`` similarly. The walker
-recurses indexes transparently.
+AutoTrader's inventory sitemap is a urlset (~39 MB) of vehicle-detail
+URLs. Cars & Bids' ``cab-sitemap/xml_sitemap.xml`` is a sitemap index;
+the walker recurses indexes transparently.
 """
 
 
-# AutoTrader listings live under ``/cars-for-sale/vehicledetails/...`` and end
-# in a 6+ digit numeric id at the tail of the path. AutoTrader documents two
-# URL shapes (see ``parsers/autotrader.py`` docstring):
-#   * ``/vehicledetails/{slug}/{id}``   — slash-separated id
-#   * ``/vehicledetails/{slug}-{id}``   — slug-embedded id (hyphen separator)
-# The parser handles both via ``re.search`` on ``(\d{6,})/?$``; mirror that here
-# by accepting either separator before the digit run. An optional trailing
-# slash is tolerated.
+# AutoTrader listings live under one of two ``/cars-for-sale/...`` prefixes
+# and end in a 6+ digit numeric id at the tail of the path. AutoTrader uses
+# two distinct URL shape families (see ``crawler/parsers/autotrader.py``):
+#   * ``/cars-for-sale/vehicledetails/{slug}/{id}``   — slash-separated id
+#   * ``/cars-for-sale/vehicledetails/{slug}-{id}``   — slug-embedded id
+#   * ``/cars-for-sale/vehicle/{id}``                 — marketplace inventory
+#     sitemap form (no slug; id is the final segment).
+# The parser handles all of these via ``re.search`` on ``(\d{6,})/?$``; mirror
+# that here by accepting either separator before the digit run. An optional
+# trailing slash is tolerated.
 _AUTOTRADER_PATH_RE = re.compile(r"(?:[/-])\d{6,}/?$")
+_AUTOTRADER_LISTING_PREFIXES: tuple[str, ...] = (
+    "/cars-for-sale/vehicledetails/",
+    "/cars-for-sale/vehicle/",
+)
 
 
 def is_autotrader_listing(url: str) -> bool:
     """Return True if ``url`` is an AutoTrader vehicle-detail listing."""
-    if "/cars-for-sale/vehicledetails/" not in url:
+    path = urlparse(url).path
+    if not any(prefix in path for prefix in _AUTOTRADER_LISTING_PREFIXES):
         return False
-    return bool(_AUTOTRADER_PATH_RE.search(urlparse(url).path))
+    return bool(_AUTOTRADER_PATH_RE.search(path))
 
 
 def is_carsandbids_listing(url: str) -> bool:

@@ -81,6 +81,40 @@ def test_is_autotrader_listing_rejects_non_listing_paths() -> None:
     assert not is_autotrader_listing("not-a-url")
 
 
+def test_is_autotrader_listing_vehicle_path_shape() -> None:
+    """AT's marketplace sitemap uses /cars-for-sale/vehicle/<id> form."""
+    assert (
+        is_autotrader_listing("https://www.autotrader.com/cars-for-sale/vehicle/12345678") is True
+    )
+    assert (
+        is_autotrader_listing("https://www.autotrader.com/cars-for-sale/vehicle/12345678/") is True
+    )
+
+
+def test_is_autotrader_listing_vehicledetails_path_shape_still_accepted() -> None:
+    """Existing slug-embedded and slash-separated forms continue to match."""
+    assert (
+        is_autotrader_listing(
+            "https://www.autotrader.com/cars-for-sale/vehicledetails/2020-honda-civic-12345678"
+        )
+        is True
+    )
+    assert (
+        is_autotrader_listing(
+            "https://www.autotrader.com/cars-for-sale/vehicledetails/2020-honda-civic/12345678"
+        )
+        is True
+    )
+
+
+def test_is_autotrader_listing_rejects_static_pages() -> None:
+    assert is_autotrader_listing("https://www.autotrader.com/luxury") is False
+    assert is_autotrader_listing("https://www.autotrader.com/coupe") is False
+    assert is_autotrader_listing("https://www.autotrader.com/cars-for-sale/all-cars/honda") is False
+    # Only 3 digits — must fail the >=6-digit id requirement.
+    assert is_autotrader_listing("https://www.autotrader.com/cars-for-sale/vehicle/123") is False
+
+
 def test_is_carsandbids_listing_accepts_two_segment_auctions_path() -> None:
     assert is_carsandbids_listing("https://carsandbids.com/auctions/2020-honda-civic")
     assert is_carsandbids_listing("https://carsandbids.com/auctions/some-slug/")

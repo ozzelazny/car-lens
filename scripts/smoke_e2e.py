@@ -492,10 +492,7 @@ def main(argv: list[str] | None = None) -> int:
                 # ``queue_empty``.
                 if summary.exit_reason == "max_items_reached":
                     last_exit_reason = "max_items_reached"
-                elif (
-                    summary.exit_reason != "queue_empty"
-                    and last_exit_reason == "queue_empty"
-                ):
+                elif summary.exit_reason != "queue_empty" and last_exit_reason == "queue_empty":
                     last_exit_reason = summary.exit_reason
         finally:
             fetcher.close()
