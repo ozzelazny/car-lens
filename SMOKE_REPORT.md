@@ -793,3 +793,199 @@ In rough priority order:
   these cover the real-HTML fixtures for cars.com and Hemmings, the
   diagnostic / block characterization, and the parser rewrites from
   `b0e29ac`).
+
+## Fifth run — 2026-05-15 (after sitemap walker)
+
+Fifth smoke run, executed with `python scripts/smoke_e2e.py
+--include-sitemap`. Validates everything that landed since run 4
+(commit `acfdf03`):
+
+- `b0e29ac` — cars.com + Hemmings parser fixes against real
+  production HTML.
+- `d21d98c` + `f690116` — `SitemapWalker` + per-site sitemap
+  seeders for AutoTrader and Cars & Bids; the AT filter accepts
+  both slug-embedded and slash-separated IDs; walker respects a
+  3 s per-fetch politeness delay matching `PolicyConfig`.
+- Smoke harness: Hemmings seed URL switched to slug form;
+  `max_items` raised from 20 → 60; `--include-sitemap` flag
+  exposes the sitemap walker.
+
+Goal: validate the full pipeline end-to-end for all six sites,
+with particular focus on AutoTrader + Cars & Bids exercised via
+`SitemapWalker` for the first time.
+
+### Status changes vs run 4
+
+| Site         | Run 4                                              | Run 5                                                             | Notes |
+|--------------|----------------------------------------------------|-------------------------------------------------------------------|-------|
+| cars.com     | 200 + 19 listing URLs enqueued, 0 followed up      | **200 + 19 listing URLs enqueued, 19 fetched, 0 parsed**          | All 19 listing pages fetched successfully (HTTP 200 via curl_cffi) — the higher `max_items=60` finally exercised the listing-parser stage. Every page returned `"no Vehicle JSON-LD found"`: the listing detail pages do *not* embed the same JSON-LD shape the parser expects. This is a fresh, parser-side finding for run 5; previous runs never reached the listing stage. |
+| AutoTrader   | 200 + 0 listings                                   | **search 200 + 0 listings; sitemap walked=10000 matched=0**       | Search-page path unchanged from run 4. **Sitemap walker ran for the first time**: walked 10,000 URLs from sub-sitemaps before hitting `max_urls`, but **0 matched** the `/cars-for-sale/vehicledetails/...` filter. The sub-sitemap `sitemap_dlr.xml.gz` failed XML parse (likely served uncompressed or as HTML) — that branch was skipped. Other sub-sitemaps yielded URLs that aren't vehicle-detail pages. |
+| Craigslist   | 17 listing URLs (all pending)                      | **17 listing URLs enqueued, 7 fetched + parsed, 10 pending**      | Now we get actual listings: 7 Craigslist rows in `listings`. The `max_items=60` bump did its job for this site. |
+| BaT          | 14 listings                                        | **28 listings**                                                   | Doubled the run-4 BaT row count — all 28 discovered listing URLs were fetched and parsed (run 4 was capped at 14 by `max_items=20`). |
+| Hemmings     | 200 + 0 listings                                   | **200 + 7 listing URLs enqueued, 0 fetched (max_items starved)**  | Slug-URL seed change worked: the rewritten parser now extracts 7 listing URLs from the live search page, matching the real-HTML fixture. But `max_items=60` was consumed by BaT (28) + cars.com (19) + Craigslist (7) + searches (6), so none of the 7 Hemmings listings reached the listing-fetch stage. The search-side fix is confirmed end-to-end. |
+| Cars & Bids  | 403                                                | **search 403; sitemap walked=0 matched=0** (XML parse failed)     | Search path unchanged. **Sitemap walker ran for the first time** and failed immediately: `https://carsandbids.com/cab-sitemap/xml` returned content that isn't well-formed XML (`syntax error: line 1, column 0`). The walker emitted a warning and yielded nothing. |
+
+### Run summary
+
+- Total elapsed: **497.7 s** (vs 196.2 s in run 4) — the
+  sitemap-seed phase added ~50 s up front (AT sitemap walk +
+  3 s-per-fetch politeness), and `max_items=60` (vs 20) tripled
+  the listing-fetch volume.
+- Crawler `exit_reason`: **`max_items_reached`** (hit the
+  bumped 60-item cap; 142 items remain pending: 28 BaT image
+  rows + 97 Craigslist image rows + 10 Craigslist listings + 7
+  Hemmings listings).
+- Worker stats: **`requests_total=60 ok=59 failed=1
+  listings_inserted=35 urls_enqueued=196`**. The single failure
+  is Cars & Bids' 403 on the search-page path (unchanged from
+  prior runs).
+- Listings inserted: **35** (28 BaT + 7 Craigslist) — best
+  total of any smoke run so far (run 4 was 14, run 3 was 14).
+- Sitemap-seed stats:
+  - `autotrader`: walked=10000 matched=0 inserted=0 duplicates=0
+  - `carsandbids`: walked=0 matched=0 inserted=0 duplicates=0
+
+### Per-site results
+
+#### cars.com — listing-fetch stage exercised for the first time (0 parsed)
+
+- Search page: **HTTP 200 via curl_cffi(chrome131)**, 19
+  listing URLs extracted (identical count to run 4, same real-
+  HTML fixture path).
+- Listing pages: **all 19 fetched (HTTP 200), 0 parsed**.
+  Every fetch returned the parser note `"no Vehicle JSON-LD
+  found"`. Sample URLs that hit this:
+  - `https://www.cars.com/vehicledetail/3715142b-250e-4689-a303-e5924eb2ceaa/`
+  - `https://www.cars.com/vehicledetail/275e9719-3511-47e3-bc70-74c58a611288/`
+  - `https://www.cars.com/vehicledetail/77a5d51d-e834-4d6d-a3eb-7e6b8ed09548/`
+- **New finding**: the cars.com search-page parser fix from
+  `b0e29ac` is confirmed end-to-end (live search → 19 URLs
+  enqueued → 19 fetched). But the listing-detail parser, which
+  still relies on JSON-LD (`Vehicle` / `Car` / `Product`),
+  does not match the production listing HTML. The detail pages
+  appear to have either dropped the JSON-LD block or to use a
+  different shape. This is the **next file to characterize**
+  with a real-HTML fixture, same treatment cars.com search got
+  in `b0e29ac`.
+
+#### AutoTrader — sitemap walker active but matched nothing
+
+- **Search-page path**: HTTP 200, 10 s `wait_for_selector`
+  timeout, 0 listing cards (identical to runs 3 & 4).
+- **Sitemap-walker path (new this run)**: walked **10,000
+  URLs** from the AutoTrader sitemap index + sub-sitemaps,
+  **0 matched** the `is_autotrader_listing` filter (which
+  requires `/cars-for-sale/vehicledetails/` in the path).
+  - `https://www.autotrader.com/sitemap_dlr.xml.gz` raised
+    `ParseError(ExpatError('not well-formed (invalid token):
+    line 1, column 0'))` — that branch yielded nothing.
+  - The other reachable sub-sitemaps yielded 10,000 URLs that
+    aren't vehicle-detail pages (likely dealer pages, content
+    pages, sitemap fragments). The walker hit its
+    `max_urls=10000` cap before exhausting them.
+- **Headline for AutoTrader**: the sitemap walker pipeline
+  **works** (it walked, fetched sub-sitemaps with the 3 s
+  politeness delay, and yielded URLs), but the URL filter +
+  the sub-sitemaps reached do not produce any matches. Two
+  follow-ups: (a) investigate which sub-sitemaps in the AT
+  index actually contain vehicle-detail listings (the
+  `sitemap_dlr.xml.gz` parse failure suggests gzip decoding is
+  a separate bug — the `.xml.gz` extension implies
+  pre-compressed but the walker may have already decompressed
+  it once); (b) raise the walker's `max_urls` for AT
+  specifically, since the matching URLs might be deeper in the
+  tree.
+
+#### Craigslist — listings finally land (7 rows)
+
+- Search page: **HTTP 200**, 17 listing URLs extracted.
+- Listings parsed: **7** (with the bumped `max_items=60`,
+  Craigslist finally reached the listing-fetch stage). Sample:
+  `craigslist:7934337807` (2020 Honda Civic, VIN
+  `2HGFC2F6XLH533595`).
+- 10 listings remain pending (max_items consumed before they
+  were picked up) along with 97 image URLs.
+
+#### Bring a Trailer — 28 listings (double run 4)
+
+- Search page: **HTTP 200**, 28 listing URLs extracted.
+- Listings parsed: **28** (all of them — with `max_items=60`,
+  none of the BaT listings were starved for the first time).
+- Residual "Del Sol" model-split bug unchanged
+  (`bat:1997-honda-del-sol-3` shows `model="Del", trim="Sol Si
+  5-Speed"`).
+
+#### Hemmings — search parser works; listing fetch starved by max_items
+
+- Search page: **HTTP 200 via curl_cffi(chrome131)**, **7
+  listing URLs extracted** (matches the real-HTML fixture
+  assertion).
+- Listing pages: **0 fetched** — `max_items=60` was consumed
+  by BaT (28) + cars.com (19) + Craigslist (7) + 6 searches
+  before the Hemmings listings were picked up.
+- **Headline for Hemmings**: the slug-URL seed change from the
+  recent updates worked. The rewritten parser from `b0e29ac`
+  is confirmed end-to-end on the search side. The listing-
+  fetch stage was *not* exercised this run.
+
+#### Cars & Bids — both paths fail
+
+- **Search-page path**: HTTP 403 (unchanged from runs 2–4).
+- **Sitemap-walker path (new this run)**:
+  `https://carsandbids.com/cab-sitemap/xml` failed XML parse
+  immediately with `ParseError(ExpatError('syntax error: line
+  1, column 0'))`. **0 URLs walked, 0 matched**. The endpoint
+  is returning something that isn't well-formed XML — likely
+  HTML (a 403 page, a redirect landing, or a CDN block). The
+  walker handled it gracefully but yielded nothing.
+- **Headline for Cars & Bids**: the sitemap walker pipeline
+  itself works (no crash), but C&B's `cab-sitemap/xml` is
+  unusable from where we sit. Needs `curl_cffi` probing to
+  identify what the endpoint actually returns (an HTML body,
+  a redirect, a 403 served as text/plain, etc.), and whether
+  the C&B sitemap lives at a different URL.
+
+### Identified follow-ups / open questions
+
+In rough priority order:
+
+1. **cars.com listing-detail parser: characterize and rewrite
+   against real HTML.** All 19 detail-page fetches in this
+   run returned `"no Vehicle JSON-LD found"`. Same diagnostic
+   treatment that fixed the search parser in `b0e29ac`: save
+   one real listing-page HTML, identify the actual data shape
+   (Next.js `__NEXT_DATA__`? embedded React props? new
+   JSON-LD field name?), rewrite the parser.
+
+2. **AutoTrader sitemap: pick the right sub-sitemaps.** The
+   walker yielded 10,000 non-listing URLs from the AT sitemap
+   index. We need to either (a) find which specific
+   sub-sitemap actually contains `/cars-for-sale/vehicledetails/`
+   URLs, or (b) accept that AT doesn't expose individual
+   vehicle URLs in its public sitemap and pivot to a
+   different discovery mechanism. Also: investigate
+   `sitemap_dlr.xml.gz` — the `ExpatError` suggests it isn't
+   well-formed XML even after gzip handling. Likely a walker
+   bug (double-decompression?) or a server-side change.
+
+3. **Cars & Bids sitemap: probe the endpoint.** Use
+   `curl_cffi` directly against `cab-sitemap/xml` to capture
+   what the body actually is — HTML, JSON, a 403 page? Adjust
+   the sitemap URL or accept that C&B has no walkable
+   sitemap.
+
+4. **Per-source `max_items` caps (still).** Hemmings is *now*
+   starved instead of cars.com / Craigslist. A per-source cap
+   (e.g., 15 per source) would let every site's listing-parse
+   stage be exercised in a single run.
+
+5. **BaT two-word-model recognition.** Unchanged: "Del Sol"
+   still splits as `model=Del`. Low priority.
+
+### Pytest / lint
+
+- `ruff check .` — All checks passed.
+- `pytest` — `391 passed in 15.83s` (+31 new tests since run
+  4; covers the SitemapWalker, the per-site sitemap seeders,
+  the AT URL filter for both slug-embedded and slash-separated
+  IDs, and the harness's `--include-sitemap` integration).
