@@ -89,6 +89,22 @@ SOURCES: tuple[str, ...] = (
     "carsandbids",
 )
 
+# AutoTrader is a JS-rendered SPA; smoke run 2 (2026-05-15) confirmed that
+# ``settle_ms=5000`` alone is not enough — the listing grid hadn't hydrated by
+# the time PlaywrightFetcher read the HTML and the search returned a 4 KB
+# shell. We hint Playwright with a selector list that should match the
+# inventory grid as soon as it appears. The selector list is comma-separated
+# so Playwright matches the first that exists; AutoTrader has used several
+# wrapper class names over the years and we want to be resilient.
+WAIT_FOR_SELECTOR_BY_SOURCE: dict[str, str] = {
+    "autotrader": (
+        "[data-cmp='inventoryListing'], "
+        "[data-cmp='inventoryListingItem'], "
+        ".inventory-listing, "
+        "[data-qa='listing-card']"
+    ),
+}
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -312,6 +328,7 @@ def main() -> int:
             wait_until="domcontentloaded",
             settle_ms=5000,
             navigation_timeout_ms=45_000,
+            wait_for_selector_by_source=WAIT_FOR_SELECTOR_BY_SOURCE,
         )
         # Route cars.com and Hemmings through curl_cffi: Playwright+stealth was
         # 403'd by Cloudflare on both, almost certainly because of the headless

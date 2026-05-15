@@ -23,6 +23,7 @@ from car_lense_engine.db import open_db, queue
 
 from .browser import (
     DEFAULT_NAVIGATION_TIMEOUT_MS,
+    DEFAULT_SELECTOR_TIMEOUT_MS,
     DEFAULT_SETTLE_MS,
     DEFAULT_WAIT_UNTIL,
     PlaywrightFetcher,
@@ -149,6 +150,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--wait-for-selector",
+        action="append",
+        default=None,
+        metavar="SOURCE=SELECTOR",
+        help=(
+            "register a CSS selector to wait for after navigation when the "
+            "fetched URL belongs to SOURCE (e.g. "
+            "autotrader='[data-cmp=\"inventoryListing\"]'). Repeatable. The "
+            "selector is passed to Playwright's page.wait_for_selector; a "
+            "comma-separated CSS list is accepted. On timeout the fetch "
+            "falls through to the regular settle delay (it does NOT fail)."
+        ),
+    )
+    parser.add_argument(
+        "--selector-timeout-ms",
+        type=int,
+        default=DEFAULT_SELECTOR_TIMEOUT_MS,
+        help=(
+            "milliseconds to wait for any --wait-for-selector hint before "
+            f"giving up (default: {DEFAULT_SELECTOR_TIMEOUT_MS})."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -164,6 +188,8 @@ def _make_fetcher(
     settle_ms: int = DEFAULT_SETTLE_MS,
     navigation_timeout_ms: int = DEFAULT_NAVIGATION_TIMEOUT_MS,
     curl_cffi_sources: tuple[str, ...] = (),
+    wait_for_selector_by_source: dict[str, str] | None = None,
+    selector_timeout_ms: int = DEFAULT_SELECTOR_TIMEOUT_MS,
 ) -> Fetcher:
     """Default fetcher factory; overridden in tests via :func:`main` argument.
 
@@ -176,6 +202,8 @@ def _make_fetcher(
         wait_until=wait_until,
         settle_ms=settle_ms,
         navigation_timeout_ms=navigation_timeout_ms,
+        wait_for_selector_by_source=wait_for_selector_by_source,
+        selector_timeout_ms=selector_timeout_ms,
     )
     if not curl_cffi_sources:
         return playwright
@@ -190,6 +218,32 @@ def _parse_curl_cffi_sources(raw: str) -> tuple[str, ...]:
         return ()
     parts = [token.strip() for token in raw.split(",")]
     return tuple(part for part in parts if part)
+
+
+def _parse_wait_for_selector_args(
+    raw_items: list[str] | None,
+) -> dict[str, str]:
+    """Parse repeated ``--wait-for-selector source=selector`` flags.
+
+    Returns a dict keyed by source identifier. Raises :class:`ValueError` if
+    any entry is missing ``=`` or has an empty source / selector. The CLI
+    layer wraps that into ``parser.error`` for a clean exit code 2.
+    """
+    if not raw_items:
+        return {}
+    result: dict[str, str] = {}
+    for item in raw_items:
+        if "=" not in item:
+            raise ValueError(f"--wait-for-selector: expected 'source=selector', got {item!r}")
+        source, _, selector = item.partition("=")
+        source = source.strip()
+        selector = selector.strip()
+        if not source:
+            raise ValueError(f"--wait-for-selector: empty source in {item!r}")
+        if not selector:
+            raise ValueError(f"--wait-for-selector: empty selector for source {source!r}")
+        result[source] = selector
+    return result
 
 
 def main(
@@ -238,6 +292,22 @@ def main(
                 f"valid choices are {sorted(valid_sources)}"
             )
 
+    try:
+        wait_for_selector_by_source = _parse_wait_for_selector_args(args.wait_for_selector)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if wait_for_selector_by_source:
+        valid_sources = known_sources()
+        unknown = [s for s in wait_for_selector_by_source if s not in valid_sources]
+        if unknown:
+            parser.error(
+                f"--wait-for-selector: unknown source(s) {unknown}; "
+                f"valid choices are {sorted(valid_sources)}"
+            )
+
+    if args.selector_timeout_ms <= 0:
+        parser.error(f"--selector-timeout-ms must be > 0, got {args.selector_timeout_ms}")
+
     db_path: Path = args.db
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
@@ -285,6 +355,8 @@ def main(
             settle_ms=args.settle_ms,
             navigation_timeout_ms=args.navigation_timeout_ms,
             curl_cffi_sources=curl_cffi_sources,
+            wait_for_selector_by_source=wait_for_selector_by_source,
+            selector_timeout_ms=args.selector_timeout_ms,
         )
         try:
             summary = run_crawler(

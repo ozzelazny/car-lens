@@ -44,6 +44,7 @@ DEFAULT_TIMEZONE: str = "America/New_York"
 DEFAULT_NAVIGATION_TIMEOUT_MS: int = 30_000
 DEFAULT_SETTLE_MS: int = 3_000
 DEFAULT_WAIT_UNTIL: WaitUntil = "domcontentloaded"
+DEFAULT_SELECTOR_TIMEOUT_MS: int = 10_000
 
 
 class PlaywrightFetcher:
@@ -62,6 +63,8 @@ class PlaywrightFetcher:
         wait_until: WaitUntil = DEFAULT_WAIT_UNTIL,
         settle_ms: int = DEFAULT_SETTLE_MS,
         navigation_timeout_ms: int = DEFAULT_NAVIGATION_TIMEOUT_MS,
+        wait_for_selector_by_source: dict[str, str] | None = None,
+        selector_timeout_ms: int = DEFAULT_SELECTOR_TIMEOUT_MS,
         viewport: dict[str, int] | None = None,
         locale: str = DEFAULT_LOCALE,
         timezone_id: str = DEFAULT_TIMEZONE,
@@ -78,12 +81,39 @@ class PlaywrightFetcher:
             raise ValueError(f"settle_ms must be >= 0, got {settle_ms!r}")
         if navigation_timeout_ms <= 0:
             raise ValueError(f"navigation_timeout_ms must be > 0, got {navigation_timeout_ms!r}")
+        if selector_timeout_ms <= 0:
+            raise ValueError(f"selector_timeout_ms must be > 0, got {selector_timeout_ms!r}")
+
+        # Validate per-source selectors at construction so misconfiguration
+        # surfaces immediately (and without touching the ``playwright`` module).
+        # We import ``known_sources`` from the routing module — it's a tiny
+        # pure-Python helper with no Playwright dependency, so the lazy-import
+        # contract is preserved.
+        from .routing import known_sources  # noqa: PLC0415 - keep coupling local
+
+        validated_selectors: dict[str, str] = {}
+        if wait_for_selector_by_source:
+            valid = known_sources()
+            for source, selector in wait_for_selector_by_source.items():
+                if source not in valid:
+                    raise ValueError(
+                        f"wait_for_selector_by_source: unknown source {source!r}; "
+                        f"valid choices are {sorted(valid)}"
+                    )
+                if not isinstance(selector, str) or not selector.strip():
+                    raise ValueError(
+                        f"wait_for_selector_by_source[{source!r}]: selector must be "
+                        f"a non-empty string, got {selector!r}"
+                    )
+                validated_selectors[source] = selector
 
         self._headless = headless
         self._ua_suffix = ua_suffix
         self._wait_until: WaitUntil = wait_until
         self._settle_ms = settle_ms
         self._navigation_timeout_ms = navigation_timeout_ms
+        self._wait_for_selector_by_source: dict[str, str] = validated_selectors
+        self._selector_timeout_ms = selector_timeout_ms
         self._viewport = dict(viewport) if viewport is not None else dict(DEFAULT_VIEWPORT)
         self._locale = locale
         self._timezone_id = timezone_id
@@ -119,12 +149,15 @@ class PlaywrightFetcher:
 
         logger.info(
             "PlaywrightFetcher ready: headless=%s ua_suffix=%s wait_until=%s "
-            "settle_ms=%d navigation_timeout_ms=%d viewport=%s tz=%s",
+            "settle_ms=%d navigation_timeout_ms=%d selector_timeout_ms=%d "
+            "wait_for_selector_by_source=%s viewport=%s tz=%s",
             self._headless,
             self._ua_suffix,
             self._wait_until,
             self._settle_ms,
             self._navigation_timeout_ms,
+            self._selector_timeout_ms,
+            self._wait_for_selector_by_source,
             self._viewport,
             self._timezone_id,
         )
@@ -145,6 +178,30 @@ class PlaywrightFetcher:
                 wait_until=self._wait_until,
                 timeout=self._navigation_timeout_ms,
             )
+            # If a wait_for_selector hint is configured for this URL's source,
+            # poll for it before the time-based settle. A missing selector is
+            # NOT a fetch failure — log a warning and fall through. The
+            # downstream parser will surface "no listings" as a note if the
+            # page genuinely lacks them.
+            if self._wait_for_selector_by_source:
+                # Lazy import to keep the lazy-import contract clean (routing
+                # is pure Python — this is for symmetry with __init__'s
+                # in-method import and to avoid module-level coupling).
+                from .routing import source_for_url  # noqa: PLC0415
+
+                source = source_for_url(page.url)
+                selector = self._wait_for_selector_by_source.get(source) if source else None
+                if selector:
+                    try:
+                        page.wait_for_selector(selector, timeout=self._selector_timeout_ms)
+                    except Exception as exc:
+                        logger.warning(
+                            "wait_for_selector(%r) timed out for source=%s url=%s: %s",
+                            selector,
+                            source,
+                            url,
+                            exc,
+                        )
             page.wait_for_timeout(self._settle_ms)
             if response is None:
                 raise FetchError(f"no response object returned for {url}")

@@ -39,6 +39,8 @@ def test_cli_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
         "--settle-ms",
         "--navigation-timeout-ms",
         "--curl-cffi-sources",
+        "--wait-for-selector",
+        "--selector-timeout-ms",
     ):
         assert flag in out, f"expected {flag!r} in --help output"
 
@@ -398,6 +400,158 @@ def test_cli_curl_cffi_sources_blank_is_empty(db_path: Path) -> None:
     )
     assert rc == 0
     assert captured["curl_cffi_sources"] == ()
+
+
+def test_cli_wait_for_selector_flag_parsed(db_path: Path) -> None:
+    """--wait-for-selector autotrader=.foo propagates as {'autotrader': '.foo'}."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--wait-for-selector",
+            "autotrader=.foo",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["wait_for_selector_by_source"] == {"autotrader": ".foo"}
+
+
+def test_cli_wait_for_selector_repeatable(db_path: Path) -> None:
+    """Two --wait-for-selector flags produce two entries in the dict."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--wait-for-selector",
+            "autotrader=.foo",
+            "--wait-for-selector",
+            "cars_com=.bar",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["wait_for_selector_by_source"] == {
+        "autotrader": ".foo",
+        "cars_com": ".bar",
+    }
+
+
+def test_cli_wait_for_selector_unknown_source_rejected(
+    db_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--wait-for-selector ebay=.foo → exit 2 with a clear error."""
+    open_db(db_path).close()
+    with pytest.raises(SystemExit) as exc:
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--wait-for-selector",
+                "ebay=.foo",
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--wait-for-selector" in err
+    assert "ebay" in err
+
+
+def test_cli_wait_for_selector_malformed_rejected(
+    db_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--wait-for-selector noequalshere → exit 2 with a clear error."""
+    open_db(db_path).close()
+    with pytest.raises(SystemExit) as exc:
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--wait-for-selector",
+                "noequalshere",
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--wait-for-selector" in err
+
+
+def test_cli_wait_for_selector_default_empty(db_path: Path) -> None:
+    """Without --wait-for-selector, the factory receives an empty dict."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        captured.update(kwargs)
+        return FakeFetcher()
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_factory,
+    )
+    assert rc == 0
+    assert captured["wait_for_selector_by_source"] == {}
+    assert captured["selector_timeout_ms"] == 10000
+
+
+def test_cli_selector_timeout_ms_must_be_positive(
+    db_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--selector-timeout-ms 0 / negative → exit 2."""
+    open_db(db_path).close()
+    with pytest.raises(SystemExit) as exc:
+        crawl_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--selector-timeout-ms",
+                "0",
+            ],
+            fetcher_factory=_fake_factory,
+        )
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--selector-timeout-ms" in err
 
 
 def test_cli_filter_by_source_processes_only_matching_items(
