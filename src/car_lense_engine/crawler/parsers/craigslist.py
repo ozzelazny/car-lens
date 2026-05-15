@@ -30,7 +30,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 from .base import DiscoveredUrl, ParsedListing, ParseResult
-from .common import normalize_url, parse_int_safe, parse_year_safe, sha256_text
+from .common import find_next_page, normalize_url, parse_int_safe, parse_year_safe, sha256_text
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +150,10 @@ class CraigslistParser:
             for listing_url in listing_urls
         ]
 
-        # Pagination — accept rel=next / aria-label containing "next" / inner
-        # text containing "next" (excluding "previous"/"prev"). Craigslist
-        # most often uses ``<a class="button next">Next ›</a>`` or
+        # Pagination — shared lenient next-link detector. Craigslist most
+        # often uses ``<a class="button next">Next ›</a>`` or
         # ``<a class="cl-next-page">``; both are picked up by text matching.
-        next_url = _find_next_page(soup, base_url=url)
+        next_url = find_next_page(soup, base_url=url)
         if next_url is not None:
             new_urls.append(
                 DiscoveredUrl(
@@ -314,38 +313,6 @@ class CraigslistParser:
 
 
 # ---------- helpers ----------------------------------------------------------
-
-
-def _is_next_link(anchor: Tag) -> bool:
-    """True if the anchor looks like a 'next page' link (case-insensitive).
-
-    Recognises three signals, in order of strength:
-
-    * ``rel="next"``
-    * ``aria-label`` containing ``"next"``
-    * inner text containing ``"next"`` while excluding ``"previous"``/``"prev"``
-    """
-    rel = anchor.get("rel")
-    if isinstance(rel, list) and "next" in {str(r).lower() for r in rel}:
-        return True
-
-    aria = anchor.get("aria-label")
-    if isinstance(aria, str) and "next" in aria.lower():
-        return True
-
-    text = anchor.get_text(strip=True).lower()
-    return "next" in text and "previous" not in text and "prev" not in text
-
-
-def _find_next_page(soup: BeautifulSoup, *, base_url: str) -> str | None:
-    """Locate a pagination "next" link via :func:`_is_next_link`."""
-    for anchor in soup.find_all("a", href=True):
-        if not _is_next_link(anchor):
-            continue
-        href = anchor.get("href")
-        if isinstance(href, str) and href.strip():
-            return normalize_url(base_url, href.strip())
-    return None
 
 
 def _extract_native_id(url: str) -> str | None:

@@ -1,18 +1,15 @@
-"""AutoTrader.com parser — search pages and individual listing pages.
+"""Cars & Bids parser — search pages and individual auction listing pages.
 
-AutoTrader is structurally similar to cars.com: dealer-aggregator marketplace
-with JSON-LD ``Vehicle`` blocks on listing pages. Listing URLs typically look
-like ``/cars-for-sale/vehicledetails/<slug>-<id>`` or
-``/cars-for-sale/vehicle/<id>``, where ``<id>`` is the trailing numeric
-identifier.
+Cars & Bids is a modern auction-style marketplace with slug-keyed listing
+URLs of the form ``https://carsandbids.com/auctions/<slug>/``. Listing pages
+embed JSON-LD; given the auction nature of the site the top-level type is
+usually ``Product`` (sometimes ``Vehicle`` or ``Car``). We try Vehicle, then
+Car, then Product.
 
-Differences from cars.com handled here:
-
-* Listing-card hrefs ship in both relative and absolute form. The href regex
-  accepts both shapes.
-* Pagination text on real AutoTrader pages includes variants like
-  ``"Next page"`` (not just ``"Next"``). The next-link detector matches any
-  anchor whose text contains ``"next"`` while excluding ``"previous"``/``"prev"``.
+The slug is the native id; we surface it as ``listing_id = "carsandbids:<slug>"``.
+When JSON-LD lacks year/make/model, the worker's queue ``hints`` (the
+original seed target) are used as a fallback so we still emit a populated
+listing.
 
 Both flows are defensive: any unexpected shape is logged via
 :class:`ParseResult.notes` rather than raising.
@@ -41,23 +38,18 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
-# Listing-card href shape. Accepts both the relative path form
-# (``/cars-for-sale/vehicledetails/<slug>`` or ``/cars-for-sale/vehicle/<slug>``)
-# and the absolute form (``https://www.autotrader.com/cars-for-sale/...``).
-_LISTING_HREF_RE = re.compile(
-    r"^(?:https?://(?:www\.)?autotrader\.com)?"
-    r"/cars-for-sale/(?:vehicledetails|vehicle)/[^/?#]+/?$"
-)
+# Listing href shape — accepts both relative and absolute forms with optional
+# trailing slash.
+_LISTING_HREF_RE = re.compile(r"^(?:https?://(?:www\.)?carsandbids\.com)?/auctions/[a-z0-9-]+/?$")
 
-# Trailing numeric ID (>= 6 digits to avoid grabbing zip codes) at the end of
-# the URL path. We anchor on end-of-path to dodge any query string.
-_LISTING_ID_FROM_URL_RE = re.compile(r"(\d{6,})/?$")
+# Extract the slug from a listing URL path.
+_LISTING_SLUG_FROM_PATH_RE = re.compile(r"^/auctions/([a-z0-9-]+)/?$")
 
 
-class AutoTraderParser:
-    """Per-site parser for AutoTrader search and listing pages."""
+class CarsAndBidsParser:
+    """Per-site parser for Cars & Bids search and listing pages."""
 
-    source: str = "autotrader"
+    source: str = "carsandbids"
 
     def parse(
         self,
@@ -73,7 +65,9 @@ class AutoTraderParser:
             return self._parse_listing(html=html, url=url, hints=hints)
         if kind == "image":
             return ParseResult(
-                notes=["image kind is a no-op for autotrader (downloads handled by image pipeline)"]
+                notes=[
+                    "image kind is a no-op for carsandbids (downloads handled by image pipeline)"
+                ]
             )
         return ParseResult(notes=[f"unknown kind: {kind}"])
 
@@ -97,9 +91,10 @@ class AutoTraderParser:
             href = anchor.get("href")
             if not isinstance(href, str):
                 continue
-            if not _LISTING_HREF_RE.match(href.strip()):
+            stripped = href.strip()
+            if not _LISTING_HREF_RE.match(stripped):
                 continue
-            absolute = normalize_url(url, href.strip())
+            absolute = normalize_url(url, stripped)
             if absolute in seen:
                 continue
             seen.add(absolute)
@@ -117,9 +112,6 @@ class AutoTraderParser:
             for listing_url in listing_urls
         ]
 
-        # Pagination — shared lenient next-link detector handles rel=next,
-        # aria-label containing "next", or inner text containing "next"
-        # (excluding "previous"/"prev").
         next_url = find_next_page(soup, base_url=url)
         if next_url is not None:
             new_urls.append(
@@ -149,8 +141,6 @@ class AutoTraderParser:
         url: str,
         hints: dict[str, str | int | None],
     ) -> ParseResult:
-        del hints  # listing extraction does not need target_* hints
-
         blocks = extract_jsonld(html)
         vehicle = (
             find_jsonld_by_type(blocks, "Vehicle")
@@ -160,19 +150,31 @@ class AutoTraderParser:
         if vehicle is None:
             return ParseResult(notes=["no Vehicle JSON-LD found"])
 
-        native_id = _extract_native_id(url)
-        if native_id is None:
+        slug = _extract_slug(url)
+        if slug is None:
             return ParseResult(notes=[f"could not extract listing_id from URL: {url}"])
 
-        year = parse_year_safe(
+        hint_year = _as_int(hints.get("target_year"))
+        hint_make = _as_str(hints.get("target_make"))
+        hint_model = _as_str(hints.get("target_model"))
+
+        jsonld_year = parse_year_safe(
             _as_str(
                 vehicle.get("vehicleModelDate")
                 or vehicle.get("modelDate")
                 or vehicle.get("productionDate")
             )
         )
-        make = _name_or_string(vehicle.get("manufacturer"))
-        model = _name_or_string(vehicle.get("model"))
+        if jsonld_year is None:
+            jsonld_year = parse_year_safe(_as_str(vehicle.get("name")))
+
+        jsonld_make = _name_or_string(vehicle.get("manufacturer") or vehicle.get("brand"))
+        jsonld_model = _name_or_string(vehicle.get("model"))
+
+        year = jsonld_year if jsonld_year is not None else hint_year
+        make = jsonld_make if jsonld_make is not None else hint_make
+        model = jsonld_model if jsonld_model is not None else hint_model
+
         trim = _as_str(vehicle.get("vehicleConfiguration") or vehicle.get("trim"))
         mileage = _parse_mileage(vehicle.get("mileageFromOdometer"))
         vin = _as_str(vehicle.get("vehicleIdentificationNumber"))
@@ -180,7 +182,7 @@ class AutoTraderParser:
         image_urls = _extract_image_urls(vehicle.get("image"))
 
         listing = ParsedListing(
-            listing_id=f"{self.source}:{native_id}",
+            listing_id=f"{self.source}:{slug}",
             source=self.source,
             url=url,
             year=year,
@@ -199,10 +201,10 @@ class AutoTraderParser:
 # ---------- helpers ----------------------------------------------------------
 
 
-def _extract_native_id(url: str) -> str | None:
-    """Pull the trailing numeric ID from an AutoTrader listing URL path."""
+def _extract_slug(url: str) -> str | None:
+    """Pull the slug from a Cars & Bids listing URL path: ``/auctions/<slug>/``."""
     path = urlparse(url).path
-    match = _LISTING_ID_FROM_URL_RE.search(path)
+    match = _LISTING_SLUG_FROM_PATH_RE.match(path)
     if match is None:
         return None
     return match.group(1)
@@ -244,7 +246,7 @@ def _parse_mileage(value: Any) -> int | None:
 
 
 def _extract_image_urls(value: Any) -> list[str]:
-    """``image`` may be a string, a list of strings, or absent. Keep only http(s)."""
+    """``image`` may be a string, a list of strings, or ImageObject dicts."""
     if value is None:
         return []
     candidates: list[Any] = list(value) if isinstance(value, list) else [value]

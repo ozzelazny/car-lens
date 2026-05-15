@@ -1,18 +1,14 @@
-"""AutoTrader.com parser — search pages and individual listing pages.
+"""Hemmings parser — search pages and individual listing pages.
 
-AutoTrader is structurally similar to cars.com: dealer-aggregator marketplace
-with JSON-LD ``Vehicle`` blocks on listing pages. Listing URLs typically look
-like ``/cars-for-sale/vehicledetails/<slug>-<id>`` or
-``/cars-for-sale/vehicle/<id>``, where ``<id>`` is the trailing numeric
-identifier.
+Hemmings ships two coexisting listing URL shapes:
 
-Differences from cars.com handled here:
+* classifieds: ``https://www.hemmings.com/classifieds/dealer/<make>/<model>/<id>``
+* auctions:    ``https://www.hemmings.com/auctions/<slug>/<id>``
 
-* Listing-card hrefs ship in both relative and absolute form. The href regex
-  accepts both shapes.
-* Pagination text on real AutoTrader pages includes variants like
-  ``"Next page"`` (not just ``"Next"``). The next-link detector matches any
-  anchor whose text contains ``"next"`` while excluding ``"previous"``/``"prev"``.
+In both shapes the trailing path segment is a 6+ digit numeric native id we
+expose as ``listing_id = "hemmings:<id>"``. Listing pages embed JSON-LD —
+classifieds usually as ``Vehicle``, auctions as ``Product`` (sometimes
+``Car``). We try Vehicle, then Car, then Product.
 
 Both flows are defensive: any unexpected shape is logged via
 :class:`ParseResult.notes` rather than raising.
@@ -41,23 +37,22 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
-# Listing-card href shape. Accepts both the relative path form
-# (``/cars-for-sale/vehicledetails/<slug>`` or ``/cars-for-sale/vehicle/<slug>``)
-# and the absolute form (``https://www.autotrader.com/cars-for-sale/...``).
+# Listing href shape. Matches both classifieds and auctions URL shapes,
+# relative or absolute, with the trailing numeric (``\d{6,}``) capturing
+# the native listing id.
 _LISTING_HREF_RE = re.compile(
-    r"^(?:https?://(?:www\.)?autotrader\.com)?"
-    r"/cars-for-sale/(?:vehicledetails|vehicle)/[^/?#]+/?$"
+    r"^(?:https?://(?:www\.)?hemmings\.com)?"
+    r"/(?:classifieds|auctions)/[^?#]*?\d{6,}/?$"
 )
 
-# Trailing numeric ID (>= 6 digits to avoid grabbing zip codes) at the end of
-# the URL path. We anchor on end-of-path to dodge any query string.
-_LISTING_ID_FROM_URL_RE = re.compile(r"(\d{6,})/?$")
+# Trailing numeric id (>= 6 digits, to dodge zip codes / route fragments).
+_LISTING_ID_FROM_PATH_RE = re.compile(r"(\d{6,})/?$")
 
 
-class AutoTraderParser:
-    """Per-site parser for AutoTrader search and listing pages."""
+class HemmingsParser:
+    """Per-site parser for Hemmings search and listing pages."""
 
-    source: str = "autotrader"
+    source: str = "hemmings"
 
     def parse(
         self,
@@ -73,7 +68,7 @@ class AutoTraderParser:
             return self._parse_listing(html=html, url=url, hints=hints)
         if kind == "image":
             return ParseResult(
-                notes=["image kind is a no-op for autotrader (downloads handled by image pipeline)"]
+                notes=["image kind is a no-op for hemmings (downloads handled by image pipeline)"]
             )
         return ParseResult(notes=[f"unknown kind: {kind}"])
 
@@ -97,9 +92,10 @@ class AutoTraderParser:
             href = anchor.get("href")
             if not isinstance(href, str):
                 continue
-            if not _LISTING_HREF_RE.match(href.strip()):
+            stripped = href.strip()
+            if not _LISTING_HREF_RE.match(stripped):
                 continue
-            absolute = normalize_url(url, href.strip())
+            absolute = normalize_url(url, stripped)
             if absolute in seen:
                 continue
             seen.add(absolute)
@@ -117,9 +113,6 @@ class AutoTraderParser:
             for listing_url in listing_urls
         ]
 
-        # Pagination — shared lenient next-link detector handles rel=next,
-        # aria-label containing "next", or inner text containing "next"
-        # (excluding "previous"/"prev").
         next_url = find_next_page(soup, base_url=url)
         if next_url is not None:
             new_urls.append(
@@ -149,8 +142,6 @@ class AutoTraderParser:
         url: str,
         hints: dict[str, str | int | None],
     ) -> ParseResult:
-        del hints  # listing extraction does not need target_* hints
-
         blocks = extract_jsonld(html)
         vehicle = (
             find_jsonld_by_type(blocks, "Vehicle")
@@ -164,15 +155,29 @@ class AutoTraderParser:
         if native_id is None:
             return ParseResult(notes=[f"could not extract listing_id from URL: {url}"])
 
-        year = parse_year_safe(
+        # Hints serve as a fallback for fields the JSON-LD doesn't carry
+        # (Product-shaped auction blocks frequently lack a model field).
+        hint_year = _as_int(hints.get("target_year"))
+        hint_make = _as_str(hints.get("target_make"))
+        hint_model = _as_str(hints.get("target_model"))
+
+        jsonld_year = parse_year_safe(
             _as_str(
                 vehicle.get("vehicleModelDate")
                 or vehicle.get("modelDate")
                 or vehicle.get("productionDate")
             )
         )
-        make = _name_or_string(vehicle.get("manufacturer"))
-        model = _name_or_string(vehicle.get("model"))
+        if jsonld_year is None:
+            jsonld_year = parse_year_safe(_as_str(vehicle.get("name")))
+
+        jsonld_make = _name_or_string(vehicle.get("manufacturer") or vehicle.get("brand"))
+        jsonld_model = _name_or_string(vehicle.get("model"))
+
+        year = jsonld_year if jsonld_year is not None else hint_year
+        make = jsonld_make if jsonld_make is not None else hint_make
+        model = jsonld_model if jsonld_model is not None else hint_model
+
         trim = _as_str(vehicle.get("vehicleConfiguration") or vehicle.get("trim"))
         mileage = _parse_mileage(vehicle.get("mileageFromOdometer"))
         vin = _as_str(vehicle.get("vehicleIdentificationNumber"))
@@ -200,9 +205,9 @@ class AutoTraderParser:
 
 
 def _extract_native_id(url: str) -> str | None:
-    """Pull the trailing numeric ID from an AutoTrader listing URL path."""
+    """Pull the trailing numeric id from a Hemmings listing URL path."""
     path = urlparse(url).path
-    match = _LISTING_ID_FROM_URL_RE.search(path)
+    match = _LISTING_ID_FROM_PATH_RE.search(path)
     if match is None:
         return None
     return match.group(1)
@@ -244,7 +249,7 @@ def _parse_mileage(value: Any) -> int | None:
 
 
 def _extract_image_urls(value: Any) -> list[str]:
-    """``image`` may be a string, a list of strings, or absent. Keep only http(s)."""
+    """``image`` may be a string, a list of strings, or ImageObject dicts."""
     if value is None:
         return []
     candidates: list[Any] = list(value) if isinstance(value, list) else [value]

@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from bs4 import BeautifulSoup
+from bs4.element import Tag
+
 from car_lense_engine.crawler.parsers.common import (
     extract_jsonld,
     find_jsonld_by_type,
     find_links,
+    find_next_page,
+    is_next_link,
     normalize_url,
     parse_int_safe,
     parse_year_safe,
@@ -189,3 +194,62 @@ def test_find_links_skips_missing_href() -> None:
     html = '<a class="card">no href</a><a class="card" href="">empty</a>'
     found = find_links(html, css_selector="a.card", base_url="https://x.com/")
     assert found == []
+
+
+# ---------- is_next_link / find_next_page -----------------------------------
+
+
+def _single_anchor(html: str) -> Tag:
+    """Helper — parse and return the first <a> tag."""
+    soup = BeautifulSoup(html, features="lxml")
+    anchor = soup.find("a")
+    assert isinstance(anchor, Tag)
+    return anchor
+
+
+def test_is_next_link_rel_next() -> None:
+    anchor = _single_anchor('<a rel="next" href="/p2">Continue</a>')
+    assert is_next_link(anchor) is True
+
+
+def test_is_next_link_aria_label_contains_next() -> None:
+    anchor = _single_anchor('<a aria-label="Go to next page" href="/p2">›</a>')
+    assert is_next_link(anchor) is True
+
+
+def test_is_next_link_text_contains_next() -> None:
+    anchor = _single_anchor('<a href="/p2">Next page</a>')
+    assert is_next_link(anchor) is True
+
+
+def test_is_next_link_excludes_previous() -> None:
+    anchor = _single_anchor('<a href="/p1">Previous page</a>')
+    assert is_next_link(anchor) is False
+
+
+def test_is_next_link_excludes_prev() -> None:
+    anchor = _single_anchor('<a href="/p1">Prev</a>')
+    assert is_next_link(anchor) is False
+
+
+def test_is_next_link_unrelated_text_is_false() -> None:
+    anchor = _single_anchor('<a href="/">Home</a>')
+    assert is_next_link(anchor) is False
+
+
+def test_find_next_page_returns_first_match() -> None:
+    html = """
+    <html><body>
+      <a href="/prev">Previous</a>
+      <a href="/p3" rel="next">Next page</a>
+      <a href="/p4">Next</a>
+    </body></html>
+    """
+    soup = BeautifulSoup(html, features="lxml")
+    assert find_next_page(soup, base_url="https://example.com/") == "https://example.com/p3"
+
+
+def test_find_next_page_returns_none_when_absent() -> None:
+    html = "<html><body><a href='/x'>Previous</a></body></html>"
+    soup = BeautifulSoup(html, features="lxml")
+    assert find_next_page(soup, base_url="https://example.com/") is None

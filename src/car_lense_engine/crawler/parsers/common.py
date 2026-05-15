@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +128,47 @@ def _strip_utm_params(query: str) -> str:
             continue
         kept.append(pair)
     return "&".join(kept)
+
+
+def is_next_link(anchor: Tag) -> bool:
+    """True if the anchor looks like a 'next page' link (case-insensitive).
+
+    Recognises three signals, in order of strength:
+
+    * ``rel="next"``
+    * ``aria-label`` containing ``"next"``
+    * inner text containing ``"next"`` while excluding ``"previous"``/``"prev"``
+
+    Shared by every site whose pagination is plain-HTML rather than JS-driven
+    (cars.com / AutoTrader / Craigslist / BaT / Hemmings / Cars & Bids all
+    qualify). The check is intentionally lenient so it survives small markup
+    drift (``"Next"`` vs ``"Next page"`` vs ``"Next ›"``).
+    """
+    rel = anchor.get("rel")
+    if isinstance(rel, list) and "next" in {str(r).lower() for r in rel}:
+        return True
+
+    aria = anchor.get("aria-label")
+    if isinstance(aria, str) and "next" in aria.lower():
+        return True
+
+    text = anchor.get_text(strip=True).lower()
+    return "next" in text and "previous" not in text and "prev" not in text
+
+
+def find_next_page(soup: BeautifulSoup, *, base_url: str) -> str | None:
+    """Locate a pagination "next" link via :func:`is_next_link`.
+
+    Returns the first matching anchor's resolved absolute URL, or ``None`` if
+    no anchor on the page looks like a next-page link.
+    """
+    for anchor in soup.find_all("a", href=True):
+        if not is_next_link(anchor):
+            continue
+        href = anchor.get("href")
+        if isinstance(href, str) and href.strip():
+            return normalize_url(base_url, href.strip())
+    return None
 
 
 def find_links(html: str, *, css_selector: str, base_url: str) -> list[str]:
