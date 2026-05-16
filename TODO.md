@@ -23,7 +23,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 ## Phase 3 — Image pipeline
 
-- [ ] **3.1** Image downloader (curl_cffi, browser-fingerprint TLS)
+- [~] **3.1** Image downloader (curl_cffi, browser-fingerprint TLS)
 - [ ] **3.2** pHash near-duplicate detection
 - [ ] **3.3** CLIP-similarity label-noise filter
 - [ ] **3.4** Quality filter (resolution, blur, aspect ratio)

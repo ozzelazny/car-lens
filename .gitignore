@@ -22,12 +22,15 @@ uv.lock
 .DS_Store
 Thumbs.db
 
-# Project — large data, never committed
-data/raw/
-data/public/
-data/processed/
-models/checkpoints/
-models/exported/
+# Project — large data, never committed.
+# Paths are listed without trailing slash so the patterns match both real
+# directories and symlinks-into-native-fs (see DESIGN.md "WSL2 storage
+# convention").
+data/raw
+data/public
+data/processed
+models/checkpoints
+models/exported
 db/*.sqlite
 db/*.sqlite-journal
 db/*.sqlite-wal

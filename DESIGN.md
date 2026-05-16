@@ -118,12 +118,8 @@ Supplementary (downloads, not crawled):
 engine/
   data/
     raw/                       # crawler output, organized by site
-      cars_com/
-        listings/<id>/photo_<n>.jpg
-        listings/<id>/meta.json
-      autotrader/
-      craigslist/
-      bat/
+      <source>/<listing_id>/<sha256>.<ext>   # image content-addressed
+      <source>/<listing_id>/meta.json
     public/                    # downloaded public datasets
       stanford_cars/
       vmmrdb/
@@ -141,6 +137,24 @@ engine/
   db/
     crawl.sqlite               # listings, images, queue, dedupe index
 ```
+
+### WSL2 storage convention
+
+The repo lives on the Windows mount (`/mnt/c/...`), which is slow for the many-small-file I/O patterns image collection produces. To avoid that bottleneck:
+
+- `data/raw/`, `data/public/`, `data/processed/`, `models/checkpoints/`, `models/exported/` are **symlinks** into a native Linux ext4 location, e.g. `/home/zelazny/car_lense_data/`.
+- Code paths in the repo (and downstream tooling) continue to reference the in-repo paths — the symlinks are transparent.
+- The symlinked subdirectories are gitignored (see `.gitignore`); the `.gitkeep` placeholders in `data/` and `models/` keep the parent directories tracked.
+- On a fresh checkout, run:
+  ```
+  mkdir -p ~/car_lense_data/{raw,public,processed} ~/car_lense_data/models/{checkpoints,exported}
+  ln -s ~/car_lense_data/raw       data/raw
+  ln -s ~/car_lense_data/public    data/public
+  ln -s ~/car_lense_data/processed data/processed
+  ln -s ~/car_lense_data/models/checkpoints models/checkpoints
+  ln -s ~/car_lense_data/models/exported    models/exported
+  ```
+- `db/crawl.sqlite` stays in-repo on the Windows mount: SQLite is a single file with sequential I/O, not the multi-thousand-tiny-files workload that motivates the symlink.
 
 ## Non-goals (for now)
 
