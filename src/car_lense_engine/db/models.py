@@ -57,6 +57,9 @@ class Image(_Base):
     bytes: int | None = None
     position: int | None = None
     downloaded_at: datetime | None = None
+    view: str | None = None
+    view_score: float | None = None
+    view_labeled_at: datetime | None = None
 
 
 class QueueItem(_Base):

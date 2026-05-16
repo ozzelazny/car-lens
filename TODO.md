@@ -25,7 +25,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 - [x] **3.1** Image downloader (curl_cffi, browser-fingerprint TLS)
 - [ ] **3.2** pHash near-duplicate detection
-- [ ] **3.3** CLIP zero-shot **view + content labeling** — per image, assign `(view ∈ {front, rear, side, three-quarter-front, three-quarter-rear, interior, detail, non-car}, score)`. Drop non-car. Keep interior/detail rows in DB (excluded from training) so a v1.1 interior path is possible without re-crawling.
+- [x] **3.3** CLIP zero-shot **view + content labeling** — per image, assign `(view ∈ {front, rear, side, three-quarter-front, three-quarter-rear, interior, detail, non-car}, score)`. Drop non-car. Keep interior/detail rows in DB (excluded from training) so a v1.1 interior path is possible without re-crawling.
 - [ ] **3.4** Quality filter (resolution, blur, aspect ratio) — applied after view labeling.
 - [ ] **3.5** Train / val / test split **stratified by (class, view)** — no view leaks across splits. Exterior-only for v1.
 
