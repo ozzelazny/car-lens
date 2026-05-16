@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -251,3 +252,35 @@ def test_parse_search_real_html_extracts_listings() -> None:
         assert "/classifieds/" in du.url or "/auctions/" in du.url
         assert du.url not in seen_urls, f"duplicate listing url: {du.url}"
         seen_urls.add(du.url)
+
+
+def test_hemmings_search_parses_new_listing_url_shape() -> None:
+    """Real-world fixture exercising the new ``/listing/<slug>-<id>`` shape.
+
+    The Camaro search fixture (2026-05-16) contains 20+ cards using the
+    bare ``/listing/`` prefix (no ``/classifieds/``). The regex must
+    accept this shape; the id extractor pulls the trailing numeric.
+    """
+    fixture = (
+        Path(__file__).parent
+        / "fixtures"
+        / "real_world"
+        / "hemmings_search_camaro_curlcffi_chrome131_20260516T031700Z.html"
+    )
+    html = fixture.read_text(encoding="utf-8")
+    result = HemmingsParser().parse(
+        html=html,
+        url="https://www.hemmings.com/classifieds/cars-for-sale/chevrolet/camaro?YearFrom=1981&YearTo=2026",
+        kind="search",
+        hints={"target_year": None, "target_make": "Chevrolet", "target_model": "Camaro"},
+    )
+    listing_urls = [u.url for u in result.new_urls if u.kind == "listing"]
+    assert len(listing_urls) >= 15, (
+        f"expected >=15 listings, got {len(listing_urls)}; notes={result.notes}"
+    )
+    # Sanity-check shape: every URL should end in 6+ digits and contain /listing/
+    for u in listing_urls:
+        assert "/listing/" in u
+        assert re.search(r"\d{6,}/?$", u)
+    # Discovery should NOT emit a 'selectors may need updating' note.
+    assert not any("selectors may need updating" in n for n in result.notes), result.notes

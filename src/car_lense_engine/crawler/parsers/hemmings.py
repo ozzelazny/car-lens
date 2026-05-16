@@ -1,11 +1,14 @@
 """Hemmings parser — search pages and individual listing pages.
 
-Hemmings ships three coexisting listing URL shapes (observed against the
-saved real-world fixture in ``tests/crawler/parsers/fixtures/real_world``):
+Hemmings ships four coexisting listing URL shapes (observed against the
+saved real-world fixtures in ``tests/crawler/parsers/fixtures/real_world``):
 
 * classifieds (dealer):  ``https://www.hemmings.com/classifieds/dealer/<make>/<model>/<id>``
 * classifieds (listing): ``https://www.hemmings.com/classifieds/listing/<year>-<make>-<model>-<city>-<state>-<id>``
 * auctions:              ``https://www.hemmings.com/auctions/<slug>/<id>``
+* listing (new shape):   ``https://www.hemmings.com/listing/<year>-<make>-<model>[-<city>-<state>]-<id>``
+  — slug includes year/make/model and optional city/state, always trailing
+  the numeric id; the ``/classifieds/`` prefix is dropped.
 
 In every shape the trailing token of the final path segment is a 6+ digit
 numeric native id we expose as ``listing_id = "hemmings:<id>"``. Listing
@@ -39,12 +42,12 @@ from .common import (
 logger = logging.getLogger(__name__)
 
 
-# Listing href shape. Matches both classifieds and auctions URL shapes,
-# relative or absolute, with the trailing numeric (``\d{6,}``) capturing
-# the native listing id.
+# Listing href shape. Matches classifieds, auctions, and the newer
+# ``/listing/<slug>-<id>`` shape, relative or absolute, with the trailing
+# numeric (``\d{6,}``) capturing the native listing id.
 _LISTING_HREF_RE = re.compile(
     r"^(?:https?://(?:www\.)?hemmings\.com)?"
-    r"/(?:classifieds|auctions)/[^?#]*?\d{6,}/?$"
+    r"/(?:classifieds|auctions|listing)/[^?#]*?\d{6,}/?$"
 )
 
 # Trailing numeric id (>= 6 digits, to dodge zip codes / route fragments).

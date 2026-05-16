@@ -35,3 +35,7 @@ db/*.sqlite
 db/*.sqlite-journal
 db/*.sqlite-wal
 db/*.sqlite-shm
+
+# Catalog artifacts — regenerable from NHTSA vPIC via `build-catalog`.
+catalog/classes.json
+catalog/cache/
