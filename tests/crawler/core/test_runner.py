@@ -186,6 +186,63 @@ def test_run_crawler_exits_on_signal(db: sqlite3.Connection, fake_fetcher: FakeF
     assert summary.exit_reason == "signal"
 
 
+def test_run_crawler_forwards_image_downloader_to_worker(
+    db: sqlite3.Connection, fake_fetcher: FakeFetcher
+) -> None:
+    """A non-None image_downloader must reach the Worker constructed inside run_crawler."""
+
+    class _FakeImageDownloader:
+        """Minimal stand-in: only needs to be a sentinel for identity assertions."""
+
+        def __init__(self) -> None:
+            self.download_calls: list[str] = []
+            self.closed = False
+
+        def download(
+            self,
+            _conn: sqlite3.Connection,
+            url: str,
+            *,
+            source: str,  # noqa: ARG002
+            listing_id: str,  # noqa: ARG002
+            position: int | None = None,  # noqa: ARG002
+        ) -> None:
+            self.download_calls.append(url)
+
+        def close(self) -> None:
+            self.closed = True
+
+    sentinel = _FakeImageDownloader()
+    captured: dict[str, object] = {}
+
+    import car_lense_engine.crawler.core.runner as runner_mod
+
+    real_worker_cls = runner_mod.Worker
+
+    def _spy_worker(**kwargs: object) -> object:
+        captured["image_downloader"] = kwargs.get("image_downloader")
+        return real_worker_cls(**kwargs)  # type: ignore[arg-type]
+
+    parser = FakeParser(source="cars_com", result_factory=ParseResult())
+    # Run with an empty queue so we exit immediately without exercising the
+    # Worker's image path — we only care that the sentinel was forwarded.
+    import unittest.mock as _mock
+
+    with _mock.patch.object(runner_mod, "Worker", _spy_worker):
+        run_crawler(
+            conn=db,
+            fetcher=fake_fetcher,
+            registry=_registry_with(parser),
+            policy=_quick_policy(idle=1),
+            sleep_fn=lambda _s: None,
+            image_downloader=sentinel,  # type: ignore[arg-type]
+        )
+
+    assert captured["image_downloader"] is sentinel
+    # The runner must NOT close the downloader — lifecycle belongs to the caller.
+    assert sentinel.closed is False
+
+
 def test_run_crawler_progress_logging_smoke(
     db: sqlite3.Connection, fake_fetcher: FakeFetcher, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -32,6 +32,7 @@ from .browser import (
 )
 from .curlcffi_fetcher import CurlCffiFetcher
 from .fetcher import Fetcher
+from .image_downloader import DEFAULT_IMPERSONATE, DEFAULT_MAX_BYTES, ImageDownloader
 from .politeness import PolicyConfig
 from .proxy import mask_proxy_url, validate_proxy_url
 from .registry import ParserRegistry
@@ -39,6 +40,7 @@ from .routing import MultiFetcher, known_sources
 from .runner import run_crawler
 
 DEFAULT_DB = Path("db/crawl.sqlite")
+DEFAULT_DATA_ROOT = Path("data/raw")
 WAIT_UNTIL_CHOICES: tuple[str, ...] = ("domcontentloaded", "load", "networkidle")
 
 
@@ -188,6 +190,40 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT,
+        help=(
+            f"root directory for downloaded image bytes (default: {DEFAULT_DATA_ROOT}). "
+            "Image files are written to <data-root>/<source>/<listing_id>/<sha>.<ext>."
+        ),
+    )
+    parser.add_argument(
+        "--no-images",
+        action="store_true",
+        help=(
+            "skip the image downloader entirely. Image-kind queue items will be "
+            "marked failed by the worker. Use for dry-run or listing-only passes."
+        ),
+    )
+    parser.add_argument(
+        "--image-impersonate",
+        type=str,
+        default=DEFAULT_IMPERSONATE,
+        help=(
+            "curl_cffi browser-impersonation profile used by the image downloader "
+            f"(default: {DEFAULT_IMPERSONATE})."
+        ),
+    )
+    parser.add_argument(
+        "--image-max-bytes",
+        type=int,
+        default=DEFAULT_MAX_BYTES,
+        help=(
+            f"maximum size of a single downloaded image in bytes (default: {DEFAULT_MAX_BYTES})."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -232,6 +268,22 @@ def _make_fetcher(
     return MultiFetcher(per_source=per_source, default=playwright)
 
 
+def _make_image_downloader(
+    *,
+    data_root: Path,
+    impersonate: str = DEFAULT_IMPERSONATE,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    proxy: str | None = None,
+) -> ImageDownloader:
+    """Default image-downloader factory; overridden in tests via :func:`main`."""
+    return ImageDownloader(
+        data_root=data_root,
+        impersonate=impersonate,
+        max_bytes=max_bytes,
+        proxy=proxy,
+    )
+
+
 def _parse_curl_cffi_sources(raw: str) -> tuple[str, ...]:
     """Split the ``--curl-cffi-sources`` CSV into a tuple of source IDs."""
     if not raw or not raw.strip():
@@ -270,6 +322,7 @@ def main(
     argv: list[str] | None = None,
     *,
     fetcher_factory: object | None = None,
+    image_downloader_factory: object | None = None,
 ) -> int:
     """Entry point for the ``crawl`` console script.
 
@@ -284,6 +337,10 @@ def main(
         Playwright. Typed as ``object`` to keep the public surface
         unencumbered; the callable is invoked with all configured fetcher
         keyword arguments.
+    image_downloader_factory:
+        Optional callable invoked with ``data_root``, ``impersonate``,
+        ``max_bytes`` and ``proxy`` keyword arguments. Tests inject a fake here
+        to exercise the CLI without opening a real curl_cffi session.
     """
     parser = _build_arg_parser()
     args = parser.parse_args(argv)
@@ -366,9 +423,11 @@ def main(
         # IMPORTANT: only log the masked (credentials-free) form of the proxy.
         # The raw URL must never appear in logs.
         proxy_log_repr = mask_proxy_url(resolved_proxy) if resolved_proxy is not None else "<none>"
+        images_log_repr = "<disabled>" if args.no_images else str(args.data_root)
         log.info(
             "crawl starting: db=%s source=%s policy=[min=%.1f max=%.1f off_peak=%s "
-            "idle_exit=%ds] proxy=%s queue=[pending=%d in_progress=%d done=%d failed=%d dead=%d]",
+            "idle_exit=%ds] proxy=%s images=%s "
+            "queue=[pending=%d in_progress=%d done=%d failed=%d dead=%d]",
             db_path,
             args.source or "<all>",
             policy.min_delay_seconds,
@@ -376,6 +435,7 @@ def main(
             policy.off_peak_only,
             policy.idle_exit_seconds,
             proxy_log_repr,
+            images_log_repr,
             q_stats.pending,
             q_stats.in_progress,
             q_stats.done,
@@ -396,6 +456,23 @@ def main(
             selector_timeout_ms=args.selector_timeout_ms,
             proxy=resolved_proxy,
         )
+
+        image_downloader: ImageDownloader | None = None
+        if not args.no_images:
+            img_factory = (
+                image_downloader_factory
+                if image_downloader_factory is not None
+                else _make_image_downloader
+            )
+            if not callable(img_factory):  # pragma: no cover - defensive
+                raise TypeError("image_downloader_factory must be callable")
+            image_downloader = img_factory(
+                data_root=args.data_root,
+                impersonate=args.image_impersonate,
+                max_bytes=args.image_max_bytes,
+                proxy=resolved_proxy,
+            )
+
         try:
             summary = run_crawler(
                 conn=conn,
@@ -404,12 +481,18 @@ def main(
                 policy=policy,
                 source=args.source,
                 max_items=args.max_items,
+                image_downloader=image_downloader,
             )
         finally:
             try:
                 fetcher.close()
             except Exception:  # pragma: no cover - defensive
                 log.exception("error closing fetcher")
+            if image_downloader is not None:
+                try:
+                    image_downloader.close()
+                except Exception:  # pragma: no cover - defensive
+                    log.exception("error closing image downloader")
     finally:
         conn.close()
 

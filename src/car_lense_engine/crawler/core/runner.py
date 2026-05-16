@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict
 from car_lense_engine.db import queue
 
 from .fetcher import Fetcher
+from .image_downloader import ImageDownloader
 from .politeness import PolicyConfig, sleep_until_off_peak
 from .registry import ParserRegistry
 from .worker import Worker, WorkerStats
@@ -60,6 +61,7 @@ def run_crawler(
     clock: Callable[[], datetime] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     idle_poll_seconds: float = 1.0,
+    image_downloader: ImageDownloader | None = None,
 ) -> RunSummary:
     """Run a single worker until the queue drains, ``max_items`` is reached, or a signal arrives.
 
@@ -95,6 +97,7 @@ def run_crawler(
         fetcher=fetcher,
         registry=registry,
         policy=policy,
+        image_downloader=image_downloader,
         rng=rng,
         clock=clock,
         sleep_fn=sleep_fn,

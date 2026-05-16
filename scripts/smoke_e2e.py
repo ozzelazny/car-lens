@@ -39,6 +39,7 @@ if str(_SRC) not in sys.path:
 
 from car_lense_engine.crawler.core.browser import PlaywrightFetcher  # noqa: E402
 from car_lense_engine.crawler.core.curlcffi_fetcher import CurlCffiFetcher  # noqa: E402
+from car_lense_engine.crawler.core.image_downloader import ImageDownloader  # noqa: E402
 from car_lense_engine.crawler.core.politeness import PolicyConfig  # noqa: E402
 from car_lense_engine.crawler.core.registry import ParserRegistry  # noqa: E402
 from car_lense_engine.crawler.core.routing import MultiFetcher  # noqa: E402
@@ -59,6 +60,7 @@ from car_lense_engine.crawler.seed.sitemap_seed import (  # noqa: E402
 from car_lense_engine.db import open_db, queue  # noqa: E402
 
 DB_PATH = _REPO_ROOT / "db" / "smoke.sqlite"
+SMOKE_DATA_ROOT = _REPO_ROOT / "data" / "raw"
 
 SEED_URLS: list[tuple[str, str]] = [
     (
@@ -449,6 +451,23 @@ def main(argv: list[str] | None = None) -> int:
             default=playwright_fetcher,
         )
 
+        # Toggle image download via env var. Default ON so the smoke run
+        # exercises the full listing → image pipeline; set to "false"/"0"/"no"
+        # to run a listing-only pass (e.g. when the disk is tight or only the
+        # parser layer is being validated).
+        download_images_env = os.environ.get("SMOKE_DOWNLOAD_IMAGES", "true").strip().lower()
+        download_images = download_images_env not in {"false", "0", "no", "off"}
+        image_downloader: ImageDownloader | None = None
+        if download_images:
+            SMOKE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            image_downloader = ImageDownloader(
+                data_root=SMOKE_DATA_ROOT,
+                proxy=proxy_url,
+            )
+            log.info("image downloader enabled: data_root=%s", SMOKE_DATA_ROOT)
+        else:
+            log.info("image downloader disabled (SMOKE_DOWNLOAD_IMAGES=%s)", download_images_env)
+
         started = time.monotonic()
         # Per-source runs: invoke ``run_crawler`` once per registered source
         # with its own ``max_items`` budget so a single high-volume site
@@ -474,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
                     policy=policy,
                     source=source,
                     max_items=budget,
+                    image_downloader=image_downloader,
                 )
                 # Aggregate counters across sources.
                 agg_stats = WorkerStats(
@@ -496,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
                     last_exit_reason = summary.exit_reason
         finally:
             fetcher.close()
+            if image_downloader is not None:
+                image_downloader.close()
         elapsed = time.monotonic() - started
 
         combined_summary = RunSummary(

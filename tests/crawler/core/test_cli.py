@@ -781,6 +781,173 @@ def test_cli_proxy_not_logged_with_credentials(
     assert "gate.example.com:7000" in messages
 
 
+class _FakeImageDownloader:
+    """Stand-in for ImageDownloader: records construction kwargs + close()."""
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_cli_default_constructs_image_downloader_with_default_data_root(
+    db_path: Path,
+) -> None:
+    """Default args build an ImageDownloader with data_root=Path('data/raw')."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _img_factory(**kwargs: object) -> _FakeImageDownloader:
+        downloader = _FakeImageDownloader(**kwargs)
+        captured["downloader"] = downloader
+        captured.update(kwargs)
+        return downloader
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_fake_factory,
+        image_downloader_factory=_img_factory,
+    )
+    assert rc == 0
+    assert captured["data_root"] == Path("data/raw")
+    assert captured["impersonate"] == "chrome131"
+    assert captured["max_bytes"] == 25 * 1024 * 1024
+    assert captured["proxy"] is None
+    downloader = captured["downloader"]
+    assert isinstance(downloader, _FakeImageDownloader)
+    assert downloader.closed is True
+
+
+def test_cli_no_images_skips_downloader_construction(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-images should NOT invoke the image downloader factory at all."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+
+    calls: list[dict[str, object]] = []
+
+    def _img_factory(**kwargs: object) -> _FakeImageDownloader:
+        calls.append(kwargs)
+        return _FakeImageDownloader(**kwargs)
+
+    captured_worker: dict[str, object] = {}
+
+    import car_lense_engine.crawler.core.runner as runner_mod
+
+    real_worker_cls = runner_mod.Worker
+
+    def _spy_worker(**kwargs: object) -> object:
+        captured_worker["image_downloader"] = kwargs.get("image_downloader")
+        return real_worker_cls(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(runner_mod, "Worker", _spy_worker)
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--no-images",
+        ],
+        fetcher_factory=_fake_factory,
+        image_downloader_factory=_img_factory,
+    )
+    assert rc == 0
+    assert calls == []
+    assert captured_worker["image_downloader"] is None
+
+
+def test_cli_data_root_flag_forwarded(db_path: Path, tmp_path: Path) -> None:
+    """--data-root /custom/path is propagated to the image downloader factory."""
+    open_db(db_path).close()
+    custom_root = tmp_path / "custom-images"
+
+    captured: dict[str, object] = {}
+
+    def _img_factory(**kwargs: object) -> _FakeImageDownloader:
+        captured.update(kwargs)
+        return _FakeImageDownloader(**kwargs)
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--data-root",
+            str(custom_root),
+        ],
+        fetcher_factory=_fake_factory,
+        image_downloader_factory=_img_factory,
+    )
+    assert rc == 0
+    assert captured["data_root"] == custom_root
+
+
+def test_cli_proxy_forwarded_to_both_fetcher_and_image_downloader(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--proxy URL must reach both the fetcher factory AND the image downloader factory."""
+    open_db(db_path).close()
+    monkeypatch.delenv("PROXY_URL", raising=False)
+
+    fetcher_kwargs: dict[str, object] = {}
+
+    def _factory(**kwargs: object) -> Fetcher:
+        fetcher_kwargs.update(kwargs)
+        return FakeFetcher()
+
+    img_kwargs: dict[str, object] = {}
+
+    def _img_factory(**kwargs: object) -> _FakeImageDownloader:
+        img_kwargs.update(kwargs)
+        return _FakeImageDownloader(**kwargs)
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--proxy",
+            "http://u:p@h:8080",
+        ],
+        fetcher_factory=_factory,
+        image_downloader_factory=_img_factory,
+    )
+    assert rc == 0
+    assert fetcher_kwargs["proxy"] == "http://u:p@h:8080"
+    assert img_kwargs["proxy"] == "http://u:p@h:8080"
+
+
 def test_cli_filter_by_source_processes_only_matching_items(
     db_path: Path,
 ) -> None:
