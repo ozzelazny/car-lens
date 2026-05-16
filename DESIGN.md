@@ -37,16 +37,28 @@ This document covers `engine/`.
 
 ## Recognition engine — scope
 
-The engine produces three deployable artifacts:
+The engine produces four deployable artifacts:
 
 1. **Image encoder model** — MobileCLIP-S2 fine-tuned on car data. Exported to ONNX, then converted to Core ML (iOS) and TFLite (Android). Inference target: <30ms on mid-range mobile.
-2. **Class catalog** — for each `(make, model, generation)`, a prototype embedding plus reference metadata (canonical name, year range, body style). Distributed with the app.
-3. **`recognize()` interface** — Python module used by tests, evaluation, and (initially) a thin cloud API. Same logical contract as the on-device code.
+2. **View classifier** — small head over the same backbone that routes an input image to one of `{front, rear, side, three-quarter-front, three-quarter-rear, non-exterior}`. Inference target: <5ms; non-exterior inputs are rejected ("please photograph the car from outside").
+3. **Class catalog** — for each `(make, model, generation)`, **one prototype embedding per exterior view** (~5 views × ~2,000 classes ≈ 10k prototypes, ~25 MB). Distributed with the app.
+4. **`recognize()` interface** — Python module used by tests, evaluation, and (initially) a thin cloud API. Same logical contract as the on-device code.
 
 ```python
 recognize(image: PIL.Image) -> list[Match]
-# Match = {make, model, generation, year_range, confidence, ...}
+# Match = {make, model, generation, year_range, view, confidence, ...}
+# Returns [] (with a "non-exterior" reason) if the view classifier rejects the input.
 ```
+
+### Accuracy-first design decisions
+
+Accuracy is the primary product priority. The architecture reflects:
+
+- **View-conditional retrieval**: query embedding is compared only against prototypes of the *same view* (front-Civic vs front-Camry, not front-Civic vs side-Camry). Removes a major source of confusion in single-prototype CLIP retrieval.
+- **Exterior-only v1**: interior recognition is doable but lower-ceiling (~70–80% vs ~93–95% top-1) and not shipping in v1. Interior images are *not* discarded from disk — they're labeled and excluded from training, so an "interior path" can be added in v1.1 as an additive feature with no API changes.
+- **Hard-negative mining** during fine-tune: the loss explicitly contrasts visually similar but different classes (Camry vs Accord, F-150 vs Silverado, Civic vs Corolla) so the model learns the discriminative features rather than overall body shape.
+- **Cloud-LLM re-rank fallback** for low-confidence cases: when on-device top-1 confidence < threshold (TBD post-eval), the top-K candidates plus the image go to the cloud LLM for a finer judgment. Preserves the "online enrichment" assumption already in the system architecture.
+- **Latency budget** stays ~30 ms on-device for the embedder + ~5 ms for the view classifier. If post-eval shows the smaller MobileCLIP-S1 closes most of the gap on the larger MobileCLIP-B with much lower latency, we'll evaluate the trade-off before final export.
 
 ## Recognition engine — pipeline
 
@@ -74,16 +86,22 @@ NHTSA vPIC ──► canonical catalog (year, make, model, trim)
             pHash dedupe + quality filter
                        │
                        ▼
-            CLIP-similarity label-noise filter
+   CLIP zero-shot view + content labeling
+   (drop non-car + interior; keep front/rear/
+    side/three-quarter as labeled exteriors)
                        │
                        ▼
-            train / val / test split
+   train / val / test split, stratified by
+   (class, view) — no view leaks across splits
                        │
                        ▼
-            MobileCLIP-S2 fine-tune (PyTorch)
+   MobileCLIP-S2 fine-tune with view-conditional
+   contrastive loss + hard-negative mining
+   (Camry↔Accord, F-150↔Silverado, etc.)
                        │
                        ▼
-            evaluation harness (top-1 / top-5 / per-make)
+   evaluation harness: top-1 / top-5 per
+   (make, view, era); confusion matrix
                        │
                        ▼
             ONNX export → Core ML / TFLite

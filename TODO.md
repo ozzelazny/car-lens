@@ -25,9 +25,9 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 - [x] **3.1** Image downloader (curl_cffi, browser-fingerprint TLS)
 - [ ] **3.2** pHash near-duplicate detection
-- [ ] **3.3** CLIP-similarity label-noise filter
-- [ ] **3.4** Quality filter (resolution, blur, aspect ratio)
-- [ ] **3.5** Train / val / test split with class-stratified sampling
+- [ ] **3.3** CLIP zero-shot **view + content labeling** — per image, assign `(view ∈ {front, rear, side, three-quarter-front, three-quarter-rear, interior, detail, non-car}, score)`. Drop non-car. Keep interior/detail rows in DB (excluded from training) so a v1.1 interior path is possible without re-crawling.
+- [ ] **3.4** Quality filter (resolution, blur, aspect ratio) — applied after view labeling.
+- [ ] **3.5** Train / val / test split **stratified by (class, view)** — no view leaks across splits. Exterior-only for v1.
 
 ## Phase 4 — Public datasets
 
@@ -39,16 +39,18 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 ## Phase 5 — Model training (not yet planned in detail)
 
-- [ ] **5.1** Baseline: pre-trained MobileCLIP-S2 zero-shot prototype-retrieval, report top-1/top-5
-- [ ] **5.2** Fine-tune MobileCLIP-S2 on combined dataset
-- [ ] **5.3** Evaluation harness — held-out test set, per-make/per-era breakdown
-- [ ] **5.4** ONNX export + Core ML + TFLite conversion
-- [ ] **5.5** On-device latency benchmark
+- [ ] **5.1** Baseline: pre-trained MobileCLIP-S2 **per-view** zero-shot prototype retrieval, report top-1/top-5 per view and overall.
+- [ ] **5.2** Fine-tune MobileCLIP-S2 with view-conditional contrastive loss + **hard-negative mining** (Camry↔Accord, F-150↔Silverado, Civic↔Corolla, etc.). Train shared backbone; emit one embedding head per image.
+- [ ] **5.3** Train the **view classifier** (small head on the same backbone over 5 exterior views + 1 "non-exterior" class).
+- [ ] **5.4** Evaluation harness — held-out test set, top-1/top-5 broken down by `(make, view, era)`; full confusion matrix; per-view accuracy gap analysis.
+- [ ] **5.5** ONNX export (embedder + view classifier) + Core ML + TFLite conversion.
+- [ ] **5.6** On-device latency benchmark (embedder ≤ 30 ms target, view classifier ≤ 5 ms target).
 
 ## Phase 6 — `recognize()` engine interface (not yet planned in detail)
 
-- [ ] **6.1** `recognize()` Python interface with two backends (cloud-LLM, on-device)
-- [ ] **6.2** CLI for one-shot inference + batch evaluation
+- [ ] **6.1** `recognize()` Python interface — view-detect → view-conditional retrieval → top-K candidates. Reject non-exterior inputs with a clear reason.
+- [ ] **6.2** Cloud-LLM re-rank fallback for low-confidence top-1 (threshold TBD post-eval).
+- [ ] **6.3** CLI for one-shot inference + batch evaluation.
 
 ## Known follow-ups (non-blocking)
 
