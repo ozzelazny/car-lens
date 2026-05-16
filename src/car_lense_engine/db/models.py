@@ -68,6 +68,7 @@ class QueueItem(_Base):
     target_year: int | None = None
     target_make: str | None = None
     target_model: str | None = None
+    parent_listing_id: str | None = None
     status: QueueStatus = "pending"
     attempts: int = 0
     last_error: str | None = None

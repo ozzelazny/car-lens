@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 # Ordered list of (version, sql_resource_name) pairs. Append new migrations here.
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, "001_initial.sql"),
+    (2, "002_image_listing_link.sql"),
 ]
 
 

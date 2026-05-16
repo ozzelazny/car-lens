@@ -21,6 +21,7 @@ from car_lense_engine.db import Listing, Source, listings, queue
 from car_lense_engine.db.models import QueueItem
 
 from .fetcher import Fetcher, FetchError
+from .image_downloader import ImageDownloader, ImageDownloadError
 from .politeness import PolicyConfig, jittered_delay
 from .registry import ParserRegistry
 
@@ -53,6 +54,7 @@ class Worker:
         fetcher: Fetcher,
         registry: ParserRegistry,
         policy: PolicyConfig,
+        image_downloader: ImageDownloader | None = None,
         rng: random.Random | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
@@ -61,6 +63,7 @@ class Worker:
         self.fetcher = fetcher
         self.registry = registry
         self.policy = policy
+        self.image_downloader = image_downloader
         self.rng = rng if rng is not None else random.Random()
         self.clock = clock if clock is not None else datetime.now
         self._sleep = sleep_fn if sleep_fn is not None else time.sleep
@@ -82,6 +85,14 @@ class Worker:
             item.kind,
             item.url,
         )
+
+        # Image-kind items bypass the parser registry entirely: there's no HTML
+        # to parse, just bytes to download. Route to the ImageDownloader if
+        # configured; otherwise fail loudly so the user knows their worker is
+        # missing a critical dependency rather than silently dropping images.
+        if item.kind == "image":
+            self._handle_image_item(item)
+            return True
 
         # Look up parser. Missing parser is a hard failure for this item.
         if not self.registry.has(item.source):
@@ -208,9 +219,52 @@ class Worker:
             target_year=du.target_year,
             target_make=du.target_make,
             target_model=du.target_model,
+            parent_listing_id=du.parent_listing_id,
         )
         if inserted:
             self.stats.urls_enqueued += 1
+
+    def _handle_image_item(self, item: QueueItem) -> None:
+        """Dispatch one ``kind='image'`` queue item to the downloader."""
+        if self.image_downloader is None:
+            err = "no image downloader configured; worker cannot process image-kind queue items"
+            logger.warning("%s — marking failed: url=%s", err, item.url)
+            queue.mark_failed(self.conn, item.url, err)
+            self._after_attempt(success=False)
+            return
+
+        # parent_listing_id is populated when parsers enqueue images via
+        # DiscoveredUrl(parent_listing_id=...). Without it we can't build the
+        # output path or attach the row to a listing — treat as a hard failure.
+        if not item.parent_listing_id:
+            err = f"image queue item missing parent_listing_id: url={item.url}"
+            logger.warning("%s", err)
+            queue.mark_failed(self.conn, item.url, err)
+            self._after_attempt(success=False)
+            return
+
+        try:
+            self.image_downloader.download(
+                self.conn,
+                item.url,
+                source=item.source,
+                listing_id=item.parent_listing_id,
+            )
+        except ImageDownloadError as exc:
+            err = f"image download failed: {exc}"
+            logger.warning("%s url=%s", err, item.url)
+            queue.mark_failed(self.conn, item.url, err)
+            self._after_attempt(success=False)
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            err = f"unexpected image download error: {exc!r}"
+            logger.exception("unexpected image download error url=%s", item.url)
+            queue.mark_failed(self.conn, item.url, err)
+            self._after_attempt(success=False)
+            return
+
+        queue.mark_done(self.conn, item.url)
+        self._after_attempt(success=True)
 
     def _after_attempt(self, *, success: bool) -> None:
         """Update counters and sleep the politeness delay. Runs once per fetched item."""

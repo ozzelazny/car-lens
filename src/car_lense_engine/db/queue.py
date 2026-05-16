@@ -44,15 +44,19 @@ def enqueue(
     target_year: int | None = None,
     target_make: str | None = None,
     target_model: str | None = None,
+    parent_listing_id: str | None = None,
 ) -> bool:
     """Add a URL to the queue. Returns ``True`` if inserted, ``False`` on duplicate."""
     sql = (
         "INSERT OR IGNORE INTO crawl_queue ("
-        "  url, source, kind, target_year, target_make, target_model"
-        ") VALUES (?, ?, ?, ?, ?, ?)"
+        "  url, source, kind, target_year, target_make, target_model, parent_listing_id"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?)"
     )
     with conn:
-        cur = conn.execute(sql, (url, source, kind, target_year, target_make, target_model))
+        cur = conn.execute(
+            sql,
+            (url, source, kind, target_year, target_make, target_model, parent_listing_id),
+        )
         return cur.rowcount > 0
 
 
