@@ -23,6 +23,7 @@ dependencies = [
     "tqdm>=4.66",
     "open_clip_torch>=2.20",
     "torch>=2.0",
+    "datasets>=2.18",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ build-catalog = "car_lense_engine.catalog.cli:main"
 seed-queue = "car_lense_engine.crawler.seed.cli:main"
 crawl = "car_lense_engine.crawler.core.cli:main"
 view-label = "car_lense_engine.dataset.cli:main"
+import-stanford-cars = "car_lense_engine.dataset.stanford_cars_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]

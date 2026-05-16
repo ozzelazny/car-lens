@@ -31,7 +31,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 ## Phase 4 — Public datasets
 
-- [ ] **4.1** Stanford Cars downloader + label normalizer
+- [x] **4.1** Stanford Cars downloader + label normalizer — ingest verified end-to-end against `Multimodal-Fatima/StanfordCars_train` (HF mirror, int ClassLabel decoded via `ds.features['label'].int2str`).
 - [ ] **4.2** VMMRdb downloader + label normalizer
 - [ ] **4.3** CompCars downloader + label normalizer
 - [ ] **4.4** Wikimedia Commons fetcher (vintage gap)
@@ -59,6 +59,8 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 - `parse_proxy_url` still echoes the raw URL in the `"missing scheme"` `ValueError` (e.g. `//user:pass@host:8080` → message contains credentials). Triggered only by schemeless input, which is unusual but possible. The missing-host and missing-port paths were fixed in `b390fa4`; this third path remains as the only residual leak surface.
 - Crawler smoke results are non-deterministic against Cloudflare-protected sites (cars.com observed flipping 200→403 between identical runs). Validation of parser fixes for those sites requires either consistent access via residential proxy OR a fixture-based test against saved HTML snapshots.
 - AutoTrader vehicle-detail pages return an Akamai Bot Manager interstitial (HTTP 200, ~3.7 KB, title "Autotrader - page unavailable", assets under `/akamai-block/...`) when fetched via `CurlCffiFetcher(impersonate="chrome131")`. Sitemap URL discovery still works, but no detail data is extractable without a residential proxy. Fixture preserved at `tests/crawler/parsers/fixtures/real_world/autotrader_detail_curlcffi_chrome131_20260515T231622Z.html`. Reopen for parser work when a proxy pool is provisioned.
+- Stanford Cars HF mirror (`Multimodal-Fatima/StanfordCars_train`) emits class strings lowercased (e.g. `"acura tl sedan 2012"`, not `"Acura TL Sedan 2012"`). Our parser preserves the casing it receives, so `listings.make` for `source='stanford_cars'` is lowercase while crawled sources store Title Case. Phase 4.5 (unified label schema) needs a normalize-on-save pass (or a case-insensitive catalog matcher) before training joins make labels across sources.
+- Migration 004 (rebuild `listings` to widen `source` CHECK) has a narrow data-loss window between `DROP TABLE listings` and `ALTER TABLE listings_new RENAME TO listings` — if a crash hits in that gap, the retry's `DROP TABLE IF EXISTS listings_new` would destroy the only copy. Safer pattern: rename old → rename new → drop old. Two-statement gap with no I/O between, so probability is tiny; close in a follow-up.
 
 ## Status legend
 

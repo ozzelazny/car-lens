@@ -14,6 +14,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (1, "001_initial.sql"),
     (2, "002_image_listing_link.sql"),
     (3, "003_image_view_label.sql"),
+    (4, "004_source_stanford_cars.sql"),
 ]
 
 
