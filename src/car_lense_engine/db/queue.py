@@ -76,19 +76,23 @@ def claim_next(
     # Manage the transaction explicitly — we need IMMEDIATE locking.
     conn.execute("BEGIN IMMEDIATE")
     try:
+        # Images drain first so a bounded run produces image bytes promptly.
+        kind_priority_sql = (
+            "CASE kind WHEN 'image' THEN 0 WHEN 'listing' THEN 1 WHEN 'search' THEN 2 ELSE 3 END"
+        )
         params: tuple[object, ...]
         if source is None:
             select_sql = (
                 "SELECT * FROM crawl_queue "
                 "WHERE status = 'pending' AND next_try_at <= ? "
-                "ORDER BY next_try_at, enqueued_at LIMIT 1"
+                f"ORDER BY {kind_priority_sql}, next_try_at, enqueued_at LIMIT 1"
             )
             params = (now_iso,)
         else:
             select_sql = (
                 "SELECT * FROM crawl_queue "
                 "WHERE status = 'pending' AND source = ? AND next_try_at <= ? "
-                "ORDER BY next_try_at, enqueued_at LIMIT 1"
+                f"ORDER BY {kind_priority_sql}, next_try_at, enqueued_at LIMIT 1"
             )
             params = (source, now_iso)
         row = conn.execute(select_sql, params).fetchone()

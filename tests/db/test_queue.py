@@ -177,3 +177,94 @@ def test_invalid_kind_rejected(db: sqlite3.Connection) -> None:
             "INSERT INTO crawl_queue (url, source, kind) VALUES (?, ?, ?)",
             ("https://x", "cars_com", "bogus"),
         )
+
+
+def test_claim_next_prefers_image_over_listing(db: sqlite3.Connection) -> None:
+    queue.enqueue(db, "https://cars.com/listing/1", source="cars_com", kind="listing")
+    queue.enqueue(
+        db,
+        "https://cars.com/image/1.jpg",
+        source="cars_com",
+        kind="image",
+        parent_listing_id="listing-1",
+    )
+
+    first = queue.claim_next(db)
+    assert first is not None
+    assert first.kind == "image"
+    assert first.url == "https://cars.com/image/1.jpg"
+
+    second = queue.claim_next(db)
+    assert second is not None
+    assert second.kind == "listing"
+    assert second.url == "https://cars.com/listing/1"
+
+
+def test_claim_next_prefers_listing_over_search(db: sqlite3.Connection) -> None:
+    queue.enqueue(db, "https://cars.com/search?q=foo", source="cars_com", kind="search")
+    queue.enqueue(db, "https://cars.com/listing/1", source="cars_com", kind="listing")
+
+    first = queue.claim_next(db)
+    assert first is not None
+    assert first.kind == "listing"
+    assert first.url == "https://cars.com/listing/1"
+
+    second = queue.claim_next(db)
+    assert second is not None
+    assert second.kind == "search"
+    assert second.url == "https://cars.com/search?q=foo"
+
+
+def test_claim_next_kind_priority_then_next_try_at(db: sqlite3.Connection) -> None:
+    earlier_url = "https://cars.com/image/early.jpg"
+    later_url = "https://cars.com/image/late.jpg"
+    queue.enqueue(db, earlier_url, source="cars_com", kind="image")
+    queue.enqueue(db, later_url, source="cars_com", kind="image")
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    earlier_iso = (now - timedelta(seconds=60)).isoformat(sep=" ", timespec="seconds")
+    later_iso = (now - timedelta(seconds=10)).isoformat(sep=" ", timespec="seconds")
+    with db:
+        db.execute(
+            "UPDATE crawl_queue SET next_try_at = ? WHERE url = ?",
+            (earlier_iso, earlier_url),
+        )
+        db.execute(
+            "UPDATE crawl_queue SET next_try_at = ? WHERE url = ?",
+            (later_iso, later_url),
+        )
+
+    first = queue.claim_next(db)
+    assert first is not None
+    assert first.url == earlier_url
+
+    second = queue.claim_next(db)
+    assert second is not None
+    assert second.url == later_url
+
+
+def test_claim_next_kind_priority_respects_source_filter(db: sqlite3.Connection) -> None:
+    queue.enqueue(
+        db,
+        "https://bat.example/image/1.jpg",
+        source="bat",
+        kind="image",
+        parent_listing_id="bat-1",
+    )
+    queue.enqueue(db, "https://cars.com/listing/1", source="cars_com", kind="listing")
+
+    # Filtering by cars_com must not pull in the bat image even though it has
+    # higher kind priority globally.
+    item = queue.claim_next(db, source="cars_com")
+    assert item is not None
+    assert item.source == "cars_com"
+    assert item.kind == "listing"
+
+    # No more pending cars_com items.
+    assert queue.claim_next(db, source="cars_com") is None
+
+    # The bat image is still available under its own source.
+    bat_item = queue.claim_next(db, source="bat")
+    assert bat_item is not None
+    assert bat_item.source == "bat"
+    assert bat_item.kind == "image"
