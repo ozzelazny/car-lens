@@ -41,6 +41,7 @@ def test_cli_help_lists_flags(capsys: pytest.CaptureFixture[str]) -> None:
         "--curl-cffi-sources",
         "--wait-for-selector",
         "--selector-timeout-ms",
+        "--no-parsers",
     ):
         assert flag in out, f"expected {flag!r} in --help output"
 
@@ -90,6 +91,7 @@ def test_cli_no_parsers_runs_but_logs_warning(
             "0",
             "--max-delay",
             "0",
+            "--no-parsers",
         ],
         fetcher_factory=_fake_factory,
     )
@@ -973,6 +975,7 @@ def test_cli_filter_by_source_processes_only_matching_items(
             "0",
             "--max-delay",
             "0",
+            "--no-parsers",
         ],
         fetcher_factory=_fake_factory,
     )
@@ -984,6 +987,87 @@ def test_cli_filter_by_source_processes_only_matching_items(
         states = {r["url"]: r["status"] for r in rows}
     finally:
         conn2.close()
-    # cars_com item processed (no parser → failed). autotrader still pending.
+    # cars_com item processed (--no-parsers → failed). autotrader still pending.
     assert states["https://cars.com/a"] == "failed"
     assert states["https://autotrader.com/a"] == "pending"
+
+
+def test_cli_register_all_parsers_by_default(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default CLI invocation must register every production parser."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _stub_run_crawler(**kwargs: object) -> object:
+        captured.update(kwargs)
+        from car_lense_engine.crawler.core.runner import RunSummary
+        from car_lense_engine.crawler.core.worker import WorkerStats
+
+        return RunSummary(stats=WorkerStats(), exit_reason="queue_empty", elapsed_seconds=0.0)
+
+    monkeypatch.setattr(crawl_cli, "run_crawler", _stub_run_crawler)
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+        ],
+        fetcher_factory=_fake_factory,
+    )
+    assert rc == 0
+    registry = captured["registry"]
+    # ParserRegistry.sources() returns a sorted list of registered source IDs.
+    assert sorted(registry.sources()) == sorted(  # type: ignore[union-attr]
+        [
+            "autotrader",
+            "bat",
+            "cars_com",
+            "carsandbids",
+            "craigslist",
+            "hemmings",
+        ]
+    )
+
+
+def test_cli_no_parsers_flag_skips_register_all(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--no-parsers must leave the registry empty (legacy plumbing-test mode)."""
+    open_db(db_path).close()
+
+    captured: dict[str, object] = {}
+
+    def _stub_run_crawler(**kwargs: object) -> object:
+        captured.update(kwargs)
+        from car_lense_engine.crawler.core.runner import RunSummary
+        from car_lense_engine.crawler.core.worker import WorkerStats
+
+        return RunSummary(stats=WorkerStats(), exit_reason="queue_empty", elapsed_seconds=0.0)
+
+    monkeypatch.setattr(crawl_cli, "run_crawler", _stub_run_crawler)
+
+    rc = crawl_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--idle-exit-seconds",
+            "0",
+            "--min-delay",
+            "0",
+            "--max-delay",
+            "0",
+            "--no-parsers",
+        ],
+        fetcher_factory=_fake_factory,
+    )
+    assert rc == 0
+    registry = captured["registry"]
+    assert registry.sources() == []  # type: ignore[union-attr]

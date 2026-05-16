@@ -46,14 +46,7 @@ from car_lense_engine.crawler.core.routing import MultiFetcher  # noqa: E402
 from car_lense_engine.crawler.core.runner import RunSummary, run_crawler  # noqa: E402
 from car_lense_engine.crawler.core.sitemap import SitemapWalker  # noqa: E402
 from car_lense_engine.crawler.core.worker import WorkerStats  # noqa: E402
-from car_lense_engine.crawler.parsers import (  # noqa: E402
-    AutoTraderParser,
-    BringATrailerParser,
-    CarsAndBidsParser,
-    CarsComParser,
-    CraigslistParser,
-    HemmingsParser,
-)
+from car_lense_engine.crawler.parsers import register_all  # noqa: E402
 from car_lense_engine.crawler.seed.sitemap_seed import (  # noqa: E402
     seed_queue_from_sitemap,
 )
@@ -161,17 +154,6 @@ def _reset_db() -> None:
         candidate = DB_PATH.with_name(DB_PATH.name + suffix) if suffix else DB_PATH
         if candidate.exists():
             candidate.unlink()
-
-
-def _build_registry() -> ParserRegistry:
-    registry = ParserRegistry()
-    registry.register(CarsComParser())
-    registry.register(AutoTraderParser())
-    registry.register(CraigslistParser())
-    registry.register(BringATrailerParser())
-    registry.register(HemmingsParser())
-    registry.register(CarsAndBidsParser())
-    return registry
 
 
 def _seed_queue(conn: object, seeds: list[tuple[str, str]]) -> None:
@@ -363,7 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     conn = open_db(DB_PATH)
 
     try:
-        registry = _build_registry()
+        registry = ParserRegistry()
+        register_all(registry)
         log.info("registered parsers: %s", registry.sources())
 
         _seed_queue(conn, SEED_URLS)

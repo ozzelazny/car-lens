@@ -4,12 +4,13 @@ Invoked via the ``crawl`` entry point declared in ``pyproject.toml``::
 
     crawl [--source SITE_ID] [--db PATH] [--max-items N] [--workers 1]
           [--off-peak] [--headless/--headed] [--min-delay 3.0] [--max-delay 5.0]
-          [--idle-exit-seconds 60] [-v]
+          [--idle-exit-seconds 60] [--no-parsers] [-v]
 
-The CLI does **not** register any parsers — Phase 2 parser packages will
-provide a ``register_all(registry)`` helper. When the registry is empty every
-claimed item is marked failed-because-no-parser; that's the expected state
-during Task 1.5.
+By default the CLI registers every production parser via
+:func:`car_lense_engine.crawler.parsers.register_all`. Pass ``--no-parsers``
+to opt in to the legacy "plumbing test" mode where the registry is empty and
+every claimed item is marked failed-because-no-parser (kept for the Task 1.5
+dev workflow and a handful of integration tests).
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import os
 import sys
 from pathlib import Path
 
+from car_lense_engine.crawler.parsers import register_all
 from car_lense_engine.db import open_db, queue
 
 from .browser import (
@@ -224,6 +226,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-parsers",
+        action="store_true",
+        help=(
+            "skip the default parser registration (legacy 'plumbing test' "
+            "mode). When set, the registry starts empty and every claimed "
+            "item is marked failed-because-no-parser. Useful for exercising "
+            "the queue/runner without hitting any parser code; otherwise the "
+            "CLI registers all production parsers via "
+            "car_lense_engine.crawler.parsers.register_all."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -412,11 +426,14 @@ def main(
     conn = open_db(db_path)
     try:
         registry = ParserRegistry()
-        if not registry.sources():
+        if not args.no_parsers:
+            register_all(registry)
+            log.info("registered parsers: %s", registry.sources())
+        else:
             log.warning(
-                "no parsers registered — every claimed item will be marked failed. "
-                "This is expected for Task 1.5; Phase 2 parser packages will populate "
-                "the registry."
+                "no parsers registered (--no-parsers) — every claimed item will be "
+                "marked failed. This is the legacy plumbing-test mode; omit "
+                "--no-parsers to register the production parsers."
             )
 
         q_stats = queue.stats(conn, source=args.source)
