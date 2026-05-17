@@ -271,3 +271,97 @@ def test_migration_8_adds_canonical_columns_and_index(db: sqlite3.Connection) ->
         "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_listings_canonical_class'"
     )
     assert cur.fetchone() is not None
+
+
+def test_migration_9_adds_generation_year_column_and_index(db: sqlite3.Connection) -> None:
+    """Migration 9 adds generation_year + the partial index (Phase 4.6)."""
+    cur = db.execute("PRAGMA table_info(listings)")
+    cols = {str(row["name"]) for row in cur.fetchall()}
+    assert "generation_year" in cols
+    cur = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' "
+        "AND name='idx_listings_canonical_generation'"
+    )
+    assert cur.fetchone() is not None
+
+
+def _generation(conn: sqlite3.Connection, listing_id: str) -> int | None:
+    row = conn.execute(
+        "SELECT generation_year FROM listings WHERE listing_id = ?",
+        (listing_id,),
+    ).fetchone()
+    return row["generation_year"]
+
+
+def test_cli_populates_generation_year(db_path: Path) -> None:
+    """The CLI populates ``generation_year`` for every visited row (Phase 4.6).
+
+    A year of 2014 lands in the 2012-2015 bucket (start year 2012);
+    2016 lands in 2016-2019 (start year 2016); a NULL year stays NULL.
+    """
+    conn = open_db(db_path)
+    try:
+        _insert(conn, listing_id="byd-2012", source="cars_com", make="BYD", model="Qin", year=2012)
+        _insert(conn, listing_id="byd-2014", source="cars_com", make="BYD", model="Qin", year=2014)
+        _insert(conn, listing_id="byd-2016", source="cars_com", make="BYD", model="Qin", year=2016)
+        _insert(
+            conn,
+            listing_id="noyear",
+            source="cars_com",
+            make="Acura",
+            model="RL",
+            year=None,
+        )
+    finally:
+        conn.close()
+
+    rc = canonicalize_cli.main(["--db", str(db_path), "--rebuild"])
+    assert rc == 0
+
+    conn = open_db(db_path)
+    try:
+        # 2012 and 2014 must collapse into the same bucket (2012).
+        assert _generation(conn, "byd-2012") == 2012
+        assert _generation(conn, "byd-2014") == 2012
+        # 2016 is the next bucket.
+        assert _generation(conn, "byd-2016") == 2016
+        # Missing year stays NULL.
+        assert _generation(conn, "noyear") is None
+    finally:
+        conn.close()
+
+
+def test_cli_backfills_generation_year_on_rerun(db_path: Path) -> None:
+    """Rows with canonical_make populated but generation_year NULL are picked up.
+
+    Simulates the Phase 4.5 -> 4.6 migration: the canonical_* columns
+    were filled in by a previous pass, but ``generation_year`` is new.
+    The next run (without --rebuild) MUST still process those rows.
+    """
+    conn = open_db(db_path)
+    try:
+        _insert(conn, listing_id="row-1", source="cars_com", make="Honda", model="Civic", year=2013)
+    finally:
+        conn.close()
+
+    # First pass: everything populated.
+    assert canonicalize_cli.main(["--db", str(db_path)]) == 0
+    conn = open_db(db_path)
+    try:
+        assert _generation(conn, "row-1") == 2012
+        # Manually NULL-out generation_year to simulate a partial backfill state.
+        conn.execute(
+            "UPDATE listings SET generation_year = NULL WHERE listing_id = ?",
+            ("row-1",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Second pass without --rebuild should still re-process the row.
+    assert canonicalize_cli.main(["--db", str(db_path)]) == 0
+    conn = open_db(db_path)
+    try:
+        assert _generation(conn, "row-1") == 2012
+    finally:
+        conn.close()

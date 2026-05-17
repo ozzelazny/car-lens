@@ -118,11 +118,15 @@ def _make_image_file(path: Path, color: tuple[int, int, int] = (128, 128, 128)) 
 
 
 def _seed_one_class(conn: sqlite3.Connection, tmp_path: Path) -> dict[str, list[Path]]:
+    from car_lense_engine.dataset.canonical_labels import year_to_generation
+
     classes = [(2012, "Acura", "RL")]
     out: dict[str, list[Path]] = {}
     counter = 0
     for year, make, model in classes:
-        cid = class_id_for(year, make, model)
+        # Phase 4.6: class id is keyed off the bucketed generation_year.
+        gen_year = year_to_generation(year)
+        cid = class_id_for(gen_year, make, model)
         assert cid is not None
         out[cid] = []
         for split_name, n in (("train", 2), ("test", 1)):
@@ -143,6 +147,7 @@ def _seed_one_class(conn: sqlite3.Connection, tmp_path: Path) -> dict[str, list[
                         split=split_name,
                         canonical_make=make,
                         canonical_model=model,
+                        generation_year=gen_year,
                     ),
                 )
                 images.insert_image(

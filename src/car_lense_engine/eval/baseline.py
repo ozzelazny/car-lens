@@ -189,6 +189,19 @@ def class_id_for(year: int | None, make: str | None, model: str | None) -> str |
     lower-cases them for stable class ids, but the cross-source
     deduplication happens upstream in the canonicalization pass. Rows
     whose canonical fields are NULL are skipped at the caller layer.
+
+    .. note::
+       As of Phase 4.6 the SQL callers
+       (:func:`_select_rows`, :func:`_per_class_train_counts`,
+       :func:`car_lense_engine.training.train_classifier._select_train_rows`)
+       pass ``listings.generation_year`` -- the 4-year bucket START year
+       -- in the ``year`` argument, NOT the raw calendar year. This
+       function is unchanged: it just formats whatever integer it
+       receives. Concretely, any calendar year in ``[2012, 2015]`` now
+       produces the class id ``"2012|honda|civic"`` because they all
+       map to the same generation bucket. The raw ``listings.year``
+       column is preserved for audit / display but is no longer the
+       grouping key for retrieval / training.
     """
     if year is None or make is None or model is None:
         return None
@@ -207,17 +220,23 @@ def _select_rows(
 ) -> list[tuple[str, Path]]:
     """Return ``(class_id, local_path)`` pairs for one (source, split) slice.
 
-    Rows with NULL ``(year, canonical_make, canonical_model)`` are
-    skipped. The query joins listings to images so a single listing with
-    multiple images contributes all its images.
+    Rows with NULL ``(generation_year, canonical_make, canonical_model)``
+    are skipped. The query joins listings to images so a single listing
+    with multiple images contributes all its images.
 
-    Reads the canonical_make / canonical_model columns added by
-    migration 8 (Phase 4.5). The user MUST run the
-    ``canonicalize-labels`` CLI before calling this -- rows whose
-    canonical fields are NULL are excluded from prototype building.
+    Reads the canonical_make / canonical_model columns (migration 8,
+    Phase 4.5) AND the generation_year column (migration 9, Phase 4.6).
+    The user MUST run the ``canonicalize-labels`` CLI before calling
+    this -- rows whose canonical / generation fields are NULL are
+    excluded from prototype building.
+
+    The bucket start year is passed as the ``year`` argument to
+    :func:`class_id_for`, so any calendar year in the same 4-year
+    bucket produces the same class id (e.g. 2012, 2013, 2014, 2015 all
+    -> ``"2012|<make>|<model>"``).
     """
     sql = (
-        "SELECT listings.year AS year, "
+        "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
         "       images.local_path AS local_path "
@@ -653,17 +672,18 @@ def _per_class_train_counts(
 ) -> dict[str, int]:
     """Map ``class_id -> n_train_images`` for the given source's train split.
 
-    Reads canonical_make / canonical_model (Phase 4.5); rows whose
-    canonical fields are NULL are excluded from the per-class counts.
+    Reads canonical_make / canonical_model (Phase 4.5) AND
+    generation_year (Phase 4.6); rows whose canonical / generation
+    fields are NULL are excluded from the per-class counts.
     """
     sql = (
-        "SELECT listings.year AS year, "
+        "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
         "       COUNT(images.image_id) AS n "
         "FROM listings JOIN images ON images.listing_id = listings.listing_id "
         "WHERE listings.source = ? AND listings.split = 'train' "
-        "GROUP BY listings.year, listings.canonical_make, listings.canonical_model"
+        "GROUP BY listings.generation_year, listings.canonical_make, listings.canonical_model"
     )
     out: dict[str, int] = defaultdict(int)
     cur = conn.execute(sql, (source,))

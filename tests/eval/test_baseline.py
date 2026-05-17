@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from car_lense_engine.dataset.canonical_labels import year_to_generation
 from car_lense_engine.db import Image, Listing, images, listings, open_db
 from car_lense_engine.eval import baseline as baseline_mod
 from car_lense_engine.eval.baseline import (
@@ -224,7 +225,13 @@ def _seed_dataset(
     test_paths: dict[str, list[Path]] = {}
     counter = 0
     for year, make, model in classes:
-        cid = class_id_for(year, make, model)
+        # Phase 4.6: baseline keys the class id off the bucketed
+        # ``generation_year``, not the raw calendar year. The test
+        # class_id for retrieval is therefore derived from the bucket
+        # start year (e.g. year=2007 -> generation_year=2004 ->
+        # class_id "2004|hyundai|sonata").
+        gen_year = year_to_generation(year)
+        cid = class_id_for(gen_year, make, model)
         assert cid is not None
         train_paths[cid] = []
         test_paths[cid] = []
@@ -248,14 +255,15 @@ def _seed_dataset(
                         make=make,
                         model=model,
                         split=split_name,
-                        # Phase 4.5: the baseline reads canonical_*
-                        # columns exclusively. The test class_id
-                        # ("2012|acura|rl") is the lower-cased canonical
-                        # form, so populating canonical_* with the raw
-                        # values matches what the canonicalize-labels
-                        # CLI would produce for Title Case inputs.
+                        # Phase 4.5 + 4.6: the baseline reads
+                        # canonical_make / canonical_model and
+                        # generation_year exclusively. Populating those
+                        # here matches what the canonicalize-labels CLI
+                        # would produce for Title Case + integer-year
+                        # inputs.
                         canonical_make=make,
                         canonical_model=model,
+                        generation_year=gen_year,
                     ),
                 )
                 image_id = f"{counter:064d}"
@@ -308,6 +316,9 @@ def test_insert_listing_persists_split(db: sqlite3.Connection) -> None:
 
 
 def test_class_id_for_drops_nulls() -> None:
+    # ``class_id_for`` is unchanged by Phase 4.6 -- it just formats
+    # whatever integer it receives. The SQL callers now pass the
+    # bucketed generation_year, but the function itself is agnostic.
     assert class_id_for(2012, "Acura", "RL") == "2012|acura|rl"
     assert class_id_for(None, "Acura", "RL") is None
     assert class_id_for(2012, None, "RL") is None
@@ -347,10 +358,11 @@ def test_baseline_top1_matches_expected_fraction(
 
     # Build a per-path embedding table. Class i gets basis vector e_i for
     # every image (both train and test) -> prototypes are exactly e_i and
-    # top-1 is 100%.
+    # top-1 is 100%. Phase 4.6: class id uses the bucketed
+    # ``generation_year``, not the raw calendar year.
     embeddings_by_path: dict[Path, torch.Tensor] = {}
     for i, (_, make, model) in enumerate(classes):
-        cid = class_id_for(classes[i][0], make, model)
+        cid = class_id_for(year_to_generation(classes[i][0]), make, model)
         assert cid is not None
         for p in train_paths[cid]:
             embeddings_by_path[p] = _basis_embedding(i)
@@ -388,10 +400,12 @@ def test_baseline_top1_matches_expected_fraction(
     assert report.overall["top_3"] == pytest.approx(1.0)
     # No confusion when every prediction is correct.
     assert report.confusion_top_pairs == []
-    # All 3 classes appear in per_class.
+    # All 3 classes appear in per_class. Note: Phase 4.6 buckets
+    # year=2007 into bucket 2004-2007 (start year 2004), so the
+    # Hyundai Sonata class id is "2004|hyundai|sonata".
     assert {m.class_id for m in report.per_class} == {
         "2012|acura|rl",
-        "2007|hyundai|sonata",
+        "2004|hyundai|sonata",
         "2012|tesla|model s",
     }
     for m in report.per_class:
@@ -417,7 +431,8 @@ def test_baseline_partial_accuracy_and_confusion(
         conn.close()
 
     embeddings_by_path: dict[Path, torch.Tensor] = {}
-    cids = [class_id_for(y, m, mo) for y, m, mo in classes]
+    # Phase 4.6: class id is keyed off generation_year, not raw year.
+    cids = [class_id_for(year_to_generation(y), m, mo) for y, m, mo in classes]
     for i, cid in enumerate(cids):
         assert cid is not None
         for p in train_paths[cid]:
@@ -483,7 +498,8 @@ def test_baseline_report_is_json_round_trippable(
 
     embeddings_by_path: dict[Path, torch.Tensor] = {}
     for i, (y, m, mo) in enumerate(classes):
-        cid = class_id_for(y, m, mo)
+        # Phase 4.6: class id is keyed off generation_year.
+        cid = class_id_for(year_to_generation(y), m, mo)
         assert cid is not None
         for p in train_paths[cid]:
             embeddings_by_path[p] = _basis_embedding(i)
@@ -546,7 +562,7 @@ def test_empty_test_set_returns_zeroed_overall(
 
     embeddings_by_path: dict[Path, torch.Tensor] = {
         p: _basis_embedding(0)
-        for p in train_paths[class_id_for(2012, "Acura", "RL")]  # type: ignore[index]
+        for p in train_paths[class_id_for(year_to_generation(2012), "Acura", "RL")]  # type: ignore[index]
     }
     _install_stub_open_clip(monkeypatch, embeddings_by_path=embeddings_by_path)
 
@@ -592,7 +608,7 @@ def test_missing_image_file_is_skipped_not_fatal(
             conn, tmp_path=tmp_path, classes=classes, n_train_per_class=2, n_test_per_class=2
         )
         # Delete one test file from disk after seeding.
-        cid = class_id_for(2012, "Acura", "RL")
+        cid = class_id_for(year_to_generation(2012), "Acura", "RL")
         assert cid is not None
         doomed = test_paths[cid][0]
         doomed.unlink()
@@ -600,7 +616,7 @@ def test_missing_image_file_is_skipped_not_fatal(
         conn.close()
 
     embeddings_by_path: dict[Path, torch.Tensor] = {}
-    cid = class_id_for(2012, "Acura", "RL")
+    cid = class_id_for(year_to_generation(2012), "Acura", "RL")
     assert cid is not None
     for p in train_paths[cid]:
         embeddings_by_path[p] = _basis_embedding(0)
@@ -658,8 +674,10 @@ def test_class_with_zero_train_excluded_from_prototypes(
             n_train_per_class=2,
             n_test_per_class=1,
         )
-        # Add a test-only row for the third class.
-        third_cid = class_id_for(*test_only_class)
+        # Add a test-only row for the third class. Phase 4.6: key the
+        # class id off the bucketed generation_year.
+        third_gen = year_to_generation(test_only_class[0])
+        third_cid = class_id_for(third_gen, test_only_class[1], test_only_class[2])
         assert third_cid is not None
         third_path = tmp_path / "imgs" / f"{third_cid}_test_solo.jpg"
         _make_image_file(third_path)
@@ -675,6 +693,7 @@ def test_class_with_zero_train_excluded_from_prototypes(
                 split="test",
                 canonical_make=test_only_class[1],
                 canonical_model=test_only_class[2],
+                generation_year=third_gen,
             ),
         )
         images.insert_image(
@@ -691,7 +710,8 @@ def test_class_with_zero_train_excluded_from_prototypes(
         conn.close()
 
     embeddings_by_path: dict[Path, torch.Tensor] = {}
-    cids = [class_id_for(y, m, mo) for y, m, mo in train_classes]
+    # Phase 4.6: class id is keyed off generation_year.
+    cids = [class_id_for(year_to_generation(y), m, mo) for y, m, mo in train_classes]
     for i, cid in enumerate(cids):
         assert cid is not None
         for p in train_paths[cid]:
@@ -769,6 +789,7 @@ def test_baseline_uses_canonical_fields_not_raw(
                         split=split_name,
                         canonical_make="Chevrolet",
                         canonical_model="Tahoe",
+                        generation_year=2012,
                     ),
                 )
                 images.insert_image(
@@ -871,7 +892,7 @@ def test_cli_writes_report_and_summary(
         )
     finally:
         conn.close()
-    cid = class_id_for(2012, "Acura", "RL")
+    cid = class_id_for(year_to_generation(2012), "Acura", "RL")
     assert cid is not None
     embeddings_by_path: dict[Path, torch.Tensor] = {
         p: _basis_embedding(0) for p in (*train_paths[cid], *test_paths[cid])

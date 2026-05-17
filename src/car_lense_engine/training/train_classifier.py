@@ -220,12 +220,17 @@ def _select_train_rows(
     Mirrors the helper in :mod:`car_lense_engine.eval.baseline` but is
     duplicated here so the two modules don't grow a tight coupling on
     each other's private SQL helpers. Reads the canonical_make /
-    canonical_model columns added by migration 8 (Phase 4.5); rows
-    whose canonical fields are NULL are skipped. The user MUST run
-    the ``canonicalize-labels`` CLI before training.
+    canonical_model columns (migration 8, Phase 4.5) AND
+    generation_year (migration 9, Phase 4.6); rows whose canonical or
+    generation fields are NULL are skipped. The user MUST run the
+    ``canonicalize-labels`` CLI before training.
+
+    As of Phase 4.6 the class id is keyed on the 4-year generation
+    bucket (bucket start year), not the raw calendar year -- adjacent
+    model years of the same vehicle now train as a single class.
     """
     sql = (
-        "SELECT listings.year AS year, "
+        "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
         "       images.local_path AS local_path "

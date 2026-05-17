@@ -111,6 +111,63 @@ def normalize_make(raw: str | None) -> str | None:
     return stripped.title()
 
 
+#: Width of a generation bucket, in years. Cars get a major redesign
+#: roughly every 4 years, so adjacent years inside a bucket are
+#: visually near-identical and should collapse into one class for
+#: retrieval purposes (Phase 4.6).
+GENERATION_BUCKET_YEARS: int = 4
+
+#: Anchor year for the generation bucket grid. Bucket boundaries fall
+#: at ``GENERATION_ANCHOR_YEAR + k * GENERATION_BUCKET_YEARS`` for any
+#: integer ``k`` (positive or negative). Choosing 1980 puts modern
+#: boundaries at 2008 / 2012 / 2016 / 2020 / 2024, which lines up
+#: reasonably with observed redesign cycles for the cars in the
+#: CompCars / Stanford Cars / VMMRdb corpora.
+GENERATION_ANCHOR_YEAR: int = 1980
+
+
+def year_to_generation(year: int | None) -> int | None:
+    """Map a calendar year to its 4-year generation bucket's START year.
+
+    The bucket grid is anchored at :data:`GENERATION_ANCHOR_YEAR` and
+    has width :data:`GENERATION_BUCKET_YEARS` (4). Examples:
+
+    * ``1980`` -> ``1980`` (start of the first modern bucket)
+    * ``1983`` -> ``1980`` (last year of bucket 1980-1983)
+    * ``1984`` -> ``1984`` (start of bucket 1984-1987)
+    * ``2012`` -> ``2012`` (start of bucket 2012-2015)
+    * ``2014`` -> ``2012`` (same bucket -> same class)
+    * ``2015`` -> ``2012`` (same bucket)
+    * ``2016`` -> ``2016`` (start of bucket 2016-2019)
+    * ``2025`` -> ``2024`` (start of bucket 2024-2027)
+
+    Pre-anchor years still bucket via Python's floor-division semantics
+    (``//`` rounds toward negative infinity), so e.g. ``1976`` lands in
+    bucket ``1976-1979`` (start year 1976). This keeps the function
+    total over the integer domain rather than rejecting old years.
+
+    ``None`` propagates through unchanged.
+    """
+    if year is None:
+        return None
+    offset = year - GENERATION_ANCHOR_YEAR
+    bucket_offset = (offset // GENERATION_BUCKET_YEARS) * GENERATION_BUCKET_YEARS
+    return GENERATION_ANCHOR_YEAR + bucket_offset
+
+
+def generation_label(year: int | None) -> str | None:
+    """Render the human-readable bucket label for a year, e.g. ``"2012-2015"``.
+
+    This is purely a display helper -- the database stores the integer
+    bucket start year (see :data:`year_to_generation`); the dash-joined
+    range is derivable. ``None`` propagates through unchanged.
+    """
+    start = year_to_generation(year)
+    if start is None:
+        return None
+    return f"{start}-{start + GENERATION_BUCKET_YEARS - 1}"
+
+
 def normalize_model(raw: str | None) -> str | None:
     """Normalize a ``model`` string.
 
@@ -133,6 +190,10 @@ def normalize_model(raw: str | None) -> str | None:
 
 
 __all__ = [
+    "GENERATION_ANCHOR_YEAR",
+    "GENERATION_BUCKET_YEARS",
+    "generation_label",
     "normalize_make",
     "normalize_model",
+    "year_to_generation",
 ]

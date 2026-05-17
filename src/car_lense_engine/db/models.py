@@ -48,6 +48,7 @@ class Listing(_Base):
     split: str | None = None
     canonical_make: str | None = None
     canonical_model: str | None = None
+    generation_year: int | None = None
 
 
 class Image(_Base):

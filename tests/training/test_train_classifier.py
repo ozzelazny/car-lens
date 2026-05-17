@@ -31,6 +31,7 @@ from typing import Any
 
 import pytest
 
+from car_lense_engine.dataset.canonical_labels import year_to_generation
 from car_lense_engine.db import Image, Listing, images, listings, open_db
 from car_lense_engine.eval.baseline import class_id_for
 
@@ -158,7 +159,10 @@ def _seed_dataset(
     test_paths: dict[str, list[Path]] = {}
     counter = 0
     for class_idx, (year, make, model) in enumerate(classes):
-        cid = class_id_for(year, make, model)
+        # Phase 4.6: training keys the class id off the bucketed
+        # ``generation_year``, not the raw calendar year.
+        gen_year = year_to_generation(year)
+        cid = class_id_for(gen_year, make, model)
         assert cid is not None
         train_paths[cid] = []
         test_paths[cid] = []
@@ -187,14 +191,13 @@ def _seed_dataset(
                         make=make,
                         model=model,
                         split=split_name,
-                        # Phase 4.5: training reads canonical_* columns
-                        # exclusively. The test class_id_for() output is
-                        # the lower-cased canonical form, so populating
-                        # canonical_* with the raw test values matches
-                        # what the canonicalize-labels CLI would
-                        # produce.
+                        # Phase 4.5 + 4.6: training reads canonical_*
+                        # columns and generation_year exclusively.
+                        # Populating these matches what
+                        # canonicalize-labels would produce.
                         canonical_make=make,
                         canonical_model=model,
+                        generation_year=gen_year,
                     ),
                 )
                 image_id = f"{counter:064d}"
@@ -454,8 +457,9 @@ def test_run_training_with_hard_negative_path_loads_weights(
         (2012, "Acura", "RL"),
         (2007, "Hyundai", "Sonata"),
     ]
-    cid0 = class_id_for(*classes[0])
-    cid1 = class_id_for(*classes[1])
+    # Phase 4.6: class id is keyed off the bucketed generation_year.
+    cid0 = class_id_for(year_to_generation(classes[0][0]), classes[0][1], classes[0][2])
+    cid1 = class_id_for(year_to_generation(classes[1][0]), classes[1][1], classes[1][2])
     assert cid0 is not None and cid1 is not None
 
     conn = open_db(db_path)
