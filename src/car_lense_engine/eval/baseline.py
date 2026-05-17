@@ -184,9 +184,11 @@ def evaluate(
 def class_id_for(year: int | None, make: str | None, model: str | None) -> str | None:
     """Render the canonical class id for a row, or ``None`` if any field is missing.
 
-    Format: ``"<year>|<make_lower>|<model_lower>"``. Lower-casing matches
-    the Stanford Cars HF mirror convention noted in TODO.md and avoids
-    Civic-vs-civic collisions until Phase 4.5 unifies the label schema.
+    Format: ``"<year>|<make_lower>|<model_lower>"``. Callers MUST pass
+    the canonical (Phase 4.5) make / model strings -- the function still
+    lower-cases them for stable class ids, but the cross-source
+    deduplication happens upstream in the canonicalization pass. Rows
+    whose canonical fields are NULL are skipped at the caller layer.
     """
     if year is None or make is None or model is None:
         return None
@@ -205,12 +207,19 @@ def _select_rows(
 ) -> list[tuple[str, Path]]:
     """Return ``(class_id, local_path)`` pairs for one (source, split) slice.
 
-    Rows with NULL ``(year, make, model)`` are skipped. The query joins
-    listings to images so a single listing with multiple images contributes
-    all its images.
+    Rows with NULL ``(year, canonical_make, canonical_model)`` are
+    skipped. The query joins listings to images so a single listing with
+    multiple images contributes all its images.
+
+    Reads the canonical_make / canonical_model columns added by
+    migration 8 (Phase 4.5). The user MUST run the
+    ``canonicalize-labels`` CLI before calling this -- rows whose
+    canonical fields are NULL are excluded from prototype building.
     """
     sql = (
-        "SELECT listings.year AS year, listings.make AS make, listings.model AS model, "
+        "SELECT listings.year AS year, "
+        "       listings.canonical_make AS make, "
+        "       listings.canonical_model AS model, "
         "       images.local_path AS local_path "
         "FROM listings "
         "JOIN images ON images.listing_id = listings.listing_id "
@@ -642,13 +651,19 @@ def _per_class_train_counts(
     *,
     source: str,
 ) -> dict[str, int]:
-    """Map ``class_id -> n_train_images`` for the given source's train split."""
+    """Map ``class_id -> n_train_images`` for the given source's train split.
+
+    Reads canonical_make / canonical_model (Phase 4.5); rows whose
+    canonical fields are NULL are excluded from the per-class counts.
+    """
     sql = (
-        "SELECT listings.year AS year, listings.make AS make, listings.model AS model, "
+        "SELECT listings.year AS year, "
+        "       listings.canonical_make AS make, "
+        "       listings.canonical_model AS model, "
         "       COUNT(images.image_id) AS n "
         "FROM listings JOIN images ON images.listing_id = listings.listing_id "
         "WHERE listings.source = ? AND listings.split = 'train' "
-        "GROUP BY listings.year, listings.make, listings.model"
+        "GROUP BY listings.year, listings.canonical_make, listings.canonical_model"
     )
     out: dict[str, int] = defaultdict(int)
     cur = conn.execute(sql, (source,))

@@ -187,6 +187,14 @@ def _seed_dataset(
                         make=make,
                         model=model,
                         split=split_name,
+                        # Phase 4.5: training reads canonical_* columns
+                        # exclusively. The test class_id_for() output is
+                        # the lower-cased canonical form, so populating
+                        # canonical_* with the raw test values matches
+                        # what the canonicalize-labels CLI would
+                        # produce.
+                        canonical_make=make,
+                        canonical_model=model,
                     ),
                 )
                 image_id = f"{counter:064d}"

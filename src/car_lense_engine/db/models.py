@@ -46,6 +46,8 @@ class Listing(_Base):
     raw_html_sha256: str | None = None
     scraped_at: datetime | None = None
     split: str | None = None
+    canonical_make: str | None = None
+    canonical_model: str | None = None
 
 
 class Image(_Base):

@@ -248,6 +248,14 @@ def _seed_dataset(
                         make=make,
                         model=model,
                         split=split_name,
+                        # Phase 4.5: the baseline reads canonical_*
+                        # columns exclusively. The test class_id
+                        # ("2012|acura|rl") is the lower-cased canonical
+                        # form, so populating canonical_* with the raw
+                        # values matches what the canonicalize-labels
+                        # CLI would produce for Title Case inputs.
+                        canonical_make=make,
+                        canonical_model=model,
                     ),
                 )
                 image_id = f"{counter:064d}"
@@ -665,6 +673,8 @@ def test_class_with_zero_train_excluded_from_prototypes(
                 make=test_only_class[1],
                 model=test_only_class[2],
                 split="test",
+                canonical_make=test_only_class[1],
+                canonical_model=test_only_class[2],
             ),
         )
         images.insert_image(
@@ -721,6 +731,90 @@ def test_class_with_zero_train_excluded_from_prototypes(
     assert report.overall["top_1"] == pytest.approx(2.0 / 3.0)
     # Only the train classes have prototypes -> n_classes == 2.
     assert report.n_classes == 2
+
+
+def test_baseline_uses_canonical_fields_not_raw(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_path: Path,
+    patch_pil_to_carry_path: None,
+) -> None:
+    """The baseline reads canonical_make / canonical_model, NOT raw make / model.
+
+    We seed two rows whose RAW make differs from CANONICAL make and
+    verify the class_id reported by the baseline matches the
+    canonical-derived form, not the raw one.
+    """
+    # Raw make values are deliberately wrong / unmapped; canonical
+    # values are the actually-correct ones. If baseline.py reads
+    # the raw column, n_classes would split (two separate raw makes);
+    # if it reads canonical, the two rows roll up into one class.
+    cid_canonical = "2012|chevrolet|tahoe"
+    conn = open_db(db_path)
+    try:
+        for i, raw_make in enumerate(["RAW1_DIFFERENT", "RAW2_ALSO_DIFFERENT"]):
+            for split_name in ("train", "test"):
+                listing_id = f"x-{i}-{split_name}"
+                img_path = tmp_path / "imgs" / f"{listing_id}.jpg"
+                _make_image_file(img_path)
+                listings.insert_listing(
+                    conn,
+                    Listing(
+                        listing_id=listing_id,
+                        source="stanford_cars",
+                        url=f"x://{listing_id}",
+                        year=2012,
+                        make=raw_make,
+                        model=f"RAW_MODEL_{i}",
+                        split=split_name,
+                        canonical_make="Chevrolet",
+                        canonical_model="Tahoe",
+                    ),
+                )
+                images.insert_image(
+                    conn,
+                    Image(
+                        image_id=f"{i:030d}{split_name:>034}",
+                        listing_id=listing_id,
+                        source_url=f"x://{listing_id}",
+                        local_path=str(img_path),
+                        position=1,
+                    ),
+                )
+    finally:
+        conn.close()
+
+    # All rows get the same embedding so the single canonical class is
+    # 100% predictable.
+    paths = sorted((tmp_path / "imgs").iterdir())
+    embeddings_by_path: dict[Path, torch.Tensor] = {p: _basis_embedding(0) for p in paths}
+    _install_stub_open_clip(monkeypatch, embeddings_by_path=embeddings_by_path)
+
+    config = BaselineConfig(
+        model_name="MobileCLIP-S2",
+        pretrained="datacompdr",
+        device="cpu",
+        batch_size=2,
+        top_ks=(1,),
+    )
+    conn = open_db(db_path)
+    try:
+        prototypes = build_prototypes(
+            conn=conn, config=config, source="stanford_cars", split="train"
+        )
+        report = evaluate(
+            conn=conn,
+            config=config,
+            prototypes=prototypes,
+            source="stanford_cars",
+            split="test",
+        )
+    finally:
+        conn.close()
+
+    # Single canonical class even though the raw makes differed.
+    assert report.n_classes == 1
+    assert {m.class_id for m in report.per_class} == {cid_canonical}
 
 
 def test_no_train_rows_returns_empty_prototypes(

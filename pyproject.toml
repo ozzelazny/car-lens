@@ -46,6 +46,7 @@ view-label = "car_lense_engine.dataset.cli:main"
 import-stanford-cars = "car_lense_engine.dataset.stanford_cars_cli:main"
 import-vmmrdb = "car_lense_engine.dataset.vmmrdb_cli:main"
 import-compcars = "car_lense_engine.dataset.compcars_cli:main"
+canonicalize-labels = "car_lense_engine.dataset.canonicalize_cli:main"
 phase5-baseline = "car_lense_engine.eval.cli:main"
 phase5-train = "car_lense_engine.training.cli:main"
 

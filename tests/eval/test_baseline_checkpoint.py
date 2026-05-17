@@ -141,6 +141,8 @@ def _seed_one_class(conn: sqlite3.Connection, tmp_path: Path) -> dict[str, list[
                         make=make,
                         model=model,
                         split=split_name,
+                        canonical_make=make,
+                        canonical_model=model,
                     ),
                 )
                 images.insert_image(

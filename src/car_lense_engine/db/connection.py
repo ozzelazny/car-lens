@@ -18,6 +18,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (5, "005_listings_split.sql"),
     (6, "006_source_vmmrdb.sql"),
     (7, "007_source_compcars.sql"),
+    (8, "008_canonical_labels.sql"),
 ]
 
 
