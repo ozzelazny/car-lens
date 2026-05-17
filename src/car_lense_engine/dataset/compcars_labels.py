@@ -15,7 +15,9 @@ look-up tables shipped under ``misc/``:
   MATLAB convention), so ``make_id = 1`` maps to ``make_names[0]`` in
   Python after we load via ``scipy.io.loadmat(squeeze_me=True)``.
 
-* ``misc/car_type.mat`` — a MATLAB v5 file containing:
+* ``misc/car_type.mat`` — a MATLAB v5 file. The canonical paper documents
+  it as containing both:
+
     - ``car_type``  : 1×12 (or 12×1) cell-array of body-style name strings,
       e.g. ``["MPV", "SUV", "sedan", "hatchback", "minibus", "fastback",
       "estate", "pickup", "hardtop convertible", "sports", "crossover",
@@ -23,9 +25,19 @@ look-up tables shipped under ``misc/``:
     - ``model_type`` : N×1 integer array mapping each ``model_id`` to a
       body-style index (1-based) or ``0`` when unknown.
 
+  However, the **live CUHK release** mirrored on Hugging Face only ships a
+  single field named ``types`` (the 12-entry body-style name list) and does
+  **not** include the ``model_type``/``model2type`` lookup array. Without
+  the lookup, ``model_id``-to-body-style resolution is impossible, so
+  :class:`CompCarsBodyTypeTable` degrades to a no-op resolver (returning
+  ``None`` for every input) and the ingest records ``listings.body_style =
+  NULL``. If a future mirror restores ``model_type``, the resolver picks it
+  up automatically with no code change required.
+
 The .mat files vary slightly across packaging snapshots (squeezed vs
-unsqueezed, ``model_type`` vs ``model2type`` field name); the loaders here
-duck-type the loaded structure so subtle re-packagings still parse.
+unsqueezed, ``model_type`` vs ``model2type`` field name, ``car_type`` vs
+``types`` body-style list name); the loaders here duck-type the loaded
+structure so subtle re-packagings still parse.
 
 Path year handling: a small fraction of CompCars images encode the year as
 NaN-equivalent strings ("nan") or as the sentinel ``"5008"``. Those are
@@ -245,36 +257,63 @@ class CompCarsNameTable:
 class CompCarsBodyTypeTable:
     """Resolve ``model_id`` to a body-style name, or ``None`` when unknown.
 
-    Loads ``misc/car_type.mat`` once. The file contains:
+    Loads ``misc/car_type.mat`` once. The canonical paper documents the
+    file as containing:
 
-    * ``car_type``  — a 12-element cell array of body-style names.
+    * ``car_type`` (or ``types`` in the live CUHK release) — a 12-element
+      cell array of body-style names.
     * ``model_type`` — a 1-D integer array indexed by ``model_id`` (1-based)
       with values in ``1..12`` (a 1-based index into ``car_type``) or ``0``
       meaning "unknown".
 
     Some snapshots name the second field ``model2type`` instead; we accept
     either spelling.
+
+    The **live CUHK release** ships only the body-style name list (under
+    the field name ``types``) and omits ``model_type``/``model2type``
+    entirely. When the lookup is missing, this table degrades to a no-op:
+    :meth:`resolve` returns ``None`` for every input. The body-style name
+    list, when present, is stored on ``self._body_style_names`` purely for
+    diagnostic logging — it isn't consulted on the no-op path.
     """
 
     def __init__(self, mat_bytes: bytes) -> None:
         raw = _load_mat(mat_bytes)
-        car_type_arr = raw.get("car_type")
-        # Accept either spelling.
+        # Accept either the canonical ``car_type`` or the live-release
+        # ``types`` spelling for the body-style name list.
+        body_style_arr = raw.get("car_type")
+        if body_style_arr is None:
+            body_style_arr = raw.get("types")
+        # Accept either ``model_type`` or ``model2type`` spelling.
         model_type_arr = raw.get("model_type")
         if model_type_arr is None:
             model_type_arr = raw.get("model2type")
-        if car_type_arr is None or model_type_arr is None:
-            raise CompCarsLabelError(
-                "car_type.mat missing 'car_type' or 'model_type'/'model2type' "
-                f"(have: {sorted(k for k in raw if not k.startswith('__'))!r})"
+
+        if body_style_arr is None:
+            self._body_style_names: list[str | None] | None = None
+        else:
+            self._body_style_names = [_coerce_str(c) for c in _to_1d_list(body_style_arr)]
+
+        if model_type_arr is None:
+            # No model_id -> body-style lookup available. Degrade to a no-op
+            # resolver so callers can still construct the table and ingest
+            # listings (with ``body_style = NULL``).
+            self._model_to_type: list[int] | None = None
+            available = sorted(k for k in raw if not k.startswith("__"))
+            logger.info(
+                "compcars body type lookup unavailable (no model_type field "
+                "in car_type.mat); listings.body_style will be NULL "
+                "(fields present: %r, body-style names: %d)",
+                available,
+                len(self._body_style_names) if self._body_style_names is not None else 0,
             )
-        self._car_types: list[str | None] = [_coerce_str(c) for c in _to_1d_list(car_type_arr)]
+            return
 
         # model_type is an int array — coerce to a plain python list of ints.
         try:
             import numpy as np  # noqa: PLC0415
         except ImportError:  # pragma: no cover - numpy is required by scipy
-            self._model_to_type: list[int] = [int(x) for x in _to_1d_list(model_type_arr)]
+            self._model_to_type = [int(x) for x in _to_1d_list(model_type_arr)]
         else:
             if isinstance(model_type_arr, np.ndarray):
                 self._model_to_type = [int(x) for x in model_type_arr.ravel().tolist()]
@@ -284,12 +323,20 @@ class CompCarsBodyTypeTable:
     def resolve(self, model_id: int) -> str | None:
         """Return the body-style name for the given 1-based ``model_id``.
 
-        Returns ``None`` when ``model_id`` is out of range or maps to ``0``
-        (unknown). Never raises.
+        Returns ``None`` when:
+
+        * the table was loaded from a .mat file lacking ``model_type``
+          (no-op mode — happens with the live CUHK release),
+        * ``model_id`` is out of range, or
+        * the model maps to ``0`` (unknown).
+
+        Never raises.
         """
+        if self._model_to_type is None or self._body_style_names is None:
+            return None
         if model_id <= 0 or model_id > len(self._model_to_type):
             return None
         type_idx = self._model_to_type[model_id - 1]
-        if type_idx <= 0 or type_idx > len(self._car_types):
+        if type_idx <= 0 or type_idx > len(self._body_style_names):
             return None
-        return self._car_types[type_idx - 1]
+        return self._body_style_names[type_idx - 1]

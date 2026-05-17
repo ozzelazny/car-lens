@@ -203,8 +203,39 @@ def test_body_type_accepts_model2type_alias() -> None:
     assert table.resolve(2) == "sedan"
 
 
-def test_body_type_rejects_missing_fields() -> None:
+def test_body_type_handles_missing_fields_as_noop() -> None:
+    """A .mat file with neither car_type/types nor model_type still loads.
+
+    The live CUHK release of car_type.mat omits the model_type lookup
+    array entirely; the resolver must degrade to a no-op instead of
+    raising at construction time.
+    """
     buf = io.BytesIO()
     scipy_io.savemat(buf, {"unrelated": np.array([1, 2, 3])})
-    with pytest.raises(CompCarsLabelError):
-        CompCarsBodyTypeTable(buf.getvalue())
+    table = CompCarsBodyTypeTable(buf.getvalue())
+    assert table.resolve(1) is None
+    assert table.resolve(999) is None
+
+
+def test_body_type_table_handles_only_types_field() -> None:
+    """Real-world car_type.mat has only 'types' — no model_type lookup.
+
+    Resolver should return ``None`` for every input.
+    """
+    buf = io.BytesIO()
+    scipy_io.savemat(buf, {"types": np.array(["MPV", "SUV", "sedan"], dtype=object)})
+    table = CompCarsBodyTypeTable(buf.getvalue())
+    assert table.resolve(1) is None
+    assert table.resolve(999) is None
+
+
+def test_body_type_table_accepts_types_field_with_model_type() -> None:
+    """If a future mirror ships both ``types`` and ``model_type``, resolution works."""
+    buf = io.BytesIO()
+    types_arr = np.array(["MPV", "SUV", "sedan"], dtype=object).reshape(1, -1)
+    mt_arr = np.array([3, 1, 2], dtype=np.int32).reshape(-1, 1)
+    scipy_io.savemat(buf, {"types": types_arr, "model_type": mt_arr})
+    table = CompCarsBodyTypeTable(buf.getvalue())
+    assert table.resolve(1) == "sedan"
+    assert table.resolve(2) == "MPV"
+    assert table.resolve(3) == "SUV"
