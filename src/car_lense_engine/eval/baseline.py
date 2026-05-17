@@ -71,6 +71,13 @@ class BaselineConfig(BaseModel):
     top_ks: tuple[int, ...] = (1, 3, 5, 10)
     """The ``K`` values at which top-K accuracy is reported."""
 
+    checkpoint_path: Path | None = None
+    """Optional path to a Phase 5.2 fine-tuned checkpoint. If set, the
+    image encoder's state dict is loaded from this file *after* the
+    pre-trained weights, so the baseline harness evaluates the
+    fine-tuned model. The classification head is not used here -- the
+    baseline always falls back to prototype-retrieval scoring."""
+
 
 class ClassMetric(BaseModel):
     """Per-class accuracy slice for the report."""
@@ -492,6 +499,17 @@ class _BaselineRunner:
                 f"`open_clip.list_pretrained('{cfg.model_name}')`. "
                 f"Underlying error: {exc!r}"
             ) from exc
+        # Optionally overlay a fine-tuned image-encoder state dict on top
+        # of the pretrained weights. The checkpoint format is the one
+        # produced by car_lense_engine.training (Phase 5.2): a dict with
+        # an "image_encoder_state_dict" entry that targets `model.visual`.
+        if cfg.checkpoint_path is not None:
+            _load_image_encoder_checkpoint(
+                model=model,
+                checkpoint_path=cfg.checkpoint_path,
+                device=cfg.device,
+                torch_mod=torch,
+            )
         model.eval()
         self._torch = torch
         self._model = model
@@ -562,6 +580,49 @@ class _BaselineRunner:
         if self._torch is None:  # pragma: no cover -- defensive
             raise RuntimeError("torch not loaded; call _ensure_model() first")
         return self._torch
+
+
+def _load_image_encoder_checkpoint(
+    *,
+    model: Any,
+    checkpoint_path: Path,
+    device: str,
+    torch_mod: Any,
+) -> None:
+    """Overlay a Phase 5.2 fine-tuned ``image_encoder_state_dict`` on ``model``.
+
+    The checkpoint is the dict format produced by
+    :func:`car_lense_engine.training.run_training`: it has
+    ``"image_encoder_state_dict"`` keyed on ``model.visual``'s parameter
+    names. We try ``model.visual.load_state_dict`` first; if the model
+    doesn't expose a ``.visual`` attribute (e.g. test stubs), we fall
+    back to ``model.load_state_dict`` on the whole model.
+
+    Bad-checkpoint cases (missing file, wrong format) raise
+    :class:`RuntimeError` with a clear message -- this is a user-visible
+    error path because a fine-tuned eval that silently runs the
+    pretrained backbone would be very confusing.
+    """
+    if not checkpoint_path.exists():
+        raise RuntimeError(f"checkpoint path does not exist: {checkpoint_path}")
+    payload = torch_mod.load(checkpoint_path, map_location=device, weights_only=False)
+    if not isinstance(payload, dict) or "image_encoder_state_dict" not in payload:
+        raise RuntimeError(
+            f"checkpoint {checkpoint_path} is not a Phase 5.2 training checkpoint "
+            "(missing 'image_encoder_state_dict' key)"
+        )
+    state = payload["image_encoder_state_dict"]
+    visual = getattr(model, "visual", None)
+    if visual is not None and hasattr(visual, "load_state_dict"):
+        visual.load_state_dict(state, strict=False)
+    else:
+        model.load_state_dict(state, strict=False)
+    logger.info(
+        "baseline: loaded fine-tuned weights from %s (epoch=%s val_top1=%s)",
+        checkpoint_path,
+        payload.get("epoch"),
+        payload.get("val_top1"),
+    )
 
 
 def _count_train_images(conn: sqlite3.Connection, *, source: str, split: str) -> int:

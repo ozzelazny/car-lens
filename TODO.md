@@ -40,7 +40,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 ## Phase 5 — Model training (not yet planned in detail)
 
 - [x] **5.1** Baseline: pre-trained MobileCLIP-S2 zero-shot prototype retrieval. Stanford Cars (196 classes, 8,014 test images): **top-1=87.88%, top-3=98.74%, top-5=99.64%, top-10=99.90%**, ~9 min on CPU. Per-view conditioning deferred to 5.2 — single-prototype baseline established first per industry convention.
-- [ ] **5.2** Fine-tune MobileCLIP-S2 with view-conditional contrastive loss + **hard-negative mining** (Camry↔Accord, F-150↔Silverado, Civic↔Corolla, etc.). Train shared backbone; emit one embedding head per image.
+- [~] **5.2** Fine-tune MobileCLIP-S2 with view-conditional contrastive loss + **hard-negative mining** (Camry↔Accord, F-150↔Silverado, Civic↔Corolla, etc.). Train shared backbone; emit one embedding head per image. **Classifier head + hard-neg-weighted CE implemented (`car_lense_engine.training`, `phase5-train` CLI). Per-view conditioning still pending Phase 3.5 view-stratified split.**
 - [ ] **5.3** Train the **view classifier** (small head on the same backbone over 5 exterior views + 1 "non-exterior" class).
 - [ ] **5.4** Evaluation harness — held-out test set, top-1/top-5 broken down by `(make, view, era)`; full confusion matrix; per-view accuracy gap analysis.
 - [ ] **5.5** ONNX export (embedder + view classifier) + Core ML + TFLite conversion.

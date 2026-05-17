@@ -112,6 +112,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=f"path for the JSON report (default: {DEFAULT_OUTPUT})",
     )
     parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "optional path to a Phase 5.2 fine-tuned checkpoint .pt file; "
+            "when set, the baseline harness loads the image-encoder weights "
+            "from the checkpoint instead of the pretrained tag (default: none)"
+        ),
+    )
+    parser.add_argument(
         "--per-class-top",
         type=int,
         default=DEFAULT_PER_CLASS_TOP,
@@ -149,11 +159,16 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
 
+    checkpoint_path: Path | None = args.checkpoint
+    if checkpoint_path is not None and not checkpoint_path.exists():
+        parser.error(f"--checkpoint path does not exist: {checkpoint_path}")
+
     config = BaselineConfig(
         model_name=args.model,
         pretrained=args.pretrained,
         device=args.device,
         batch_size=args.batch_size,
+        checkpoint_path=checkpoint_path,
     )
 
     conn = open_db(db_path)

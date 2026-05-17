@@ -43,6 +43,7 @@ crawl = "car_lense_engine.crawler.core.cli:main"
 view-label = "car_lense_engine.dataset.cli:main"
 import-stanford-cars = "car_lense_engine.dataset.stanford_cars_cli:main"
 phase5-baseline = "car_lense_engine.eval.cli:main"
+phase5-train = "car_lense_engine.training.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]
