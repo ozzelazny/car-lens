@@ -10,10 +10,10 @@ from .models import Listing
 _INSERT_SQL = """
 INSERT INTO listings (
     listing_id, source, url, year, make, model, trim, body_style,
-    mileage, vin, raw_html_sha256
+    mileage, vin, raw_html_sha256, split
 ) VALUES (
     :listing_id, :source, :url, :year, :make, :model, :trim, :body_style,
-    :mileage, :vin, :raw_html_sha256
+    :mileage, :vin, :raw_html_sha256, :split
 )
 """
 
@@ -26,6 +26,7 @@ _UPDATE_FIELDS: tuple[str, ...] = (
     "mileage",
     "vin",
     "raw_html_sha256",
+    "split",
 )
 
 
@@ -44,6 +45,7 @@ def insert_listing(conn: sqlite3.Connection, listing: Listing) -> None:
             "mileage",
             "vin",
             "raw_html_sha256",
+            "split",
         }
     )
     with conn:

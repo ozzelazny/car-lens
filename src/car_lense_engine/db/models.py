@@ -43,6 +43,7 @@ class Listing(_Base):
     vin: str | None = None
     raw_html_sha256: str | None = None
     scraped_at: datetime | None = None
+    split: str | None = None
 
 
 class Image(_Base):

@@ -39,3 +39,6 @@ db/*.sqlite-shm
 # Catalog artifacts — regenerable from NHTSA vPIC via `build-catalog`.
 catalog/classes.json
 catalog/cache/
+
+# Evaluation reports — regenerable via `phase5-baseline` / future eval CLIs.
+reports/

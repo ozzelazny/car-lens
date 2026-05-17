@@ -198,6 +198,7 @@ def import_stanford_cars(
             class_id=class_id,
             image_id=image_id,
             label=label,
+            split=split,
         )
         if listing_inserted:
             inserted_listings += 1
@@ -400,6 +401,7 @@ def _insert_listing_if_new(
     class_id: str,
     image_id: str,
     label: StanfordCarsLabel,
+    split: str,
 ) -> bool:
     """Insert a listing row, returning True if a new row was created.
 
@@ -420,6 +422,7 @@ def _insert_listing_if_new(
         make=label.make,
         model=label.model,
         body_style=label.body_style,
+        split=split,
     )
     try:
         listings.insert_listing(conn, listing)
