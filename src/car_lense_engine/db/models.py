@@ -16,6 +16,7 @@ Source = Literal[
     "carsandbids",
     "stanford_cars",
     "vmmrdb",
+    "compcars",
 ]
 
 QueueKind = Literal["search", "listing", "image"]

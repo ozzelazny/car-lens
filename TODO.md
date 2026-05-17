@@ -33,7 +33,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 - [x] **4.1** Stanford Cars downloader + label normalizer — ingest verified end-to-end against `Multimodal-Fatima/StanfordCars_train` (HF mirror, int ClassLabel decoded via `ds.features['label'].int2str`).
 - [x] **4.2** VMMRdb downloader + label normalizer — ingest module + CLI + tests built against `venetis/VMMRdb_make_model_{train,val,test}` (the only working HF mirror). HF mirror is **make_model only** (375 classes, no year), not the full 9,170-class year-make-model release. The label parser handles BOTH formats (year-suffix `honda_civic_2005` and no-year `acura_cl`); when ingesting from the venetis mirror, `listings.year` ends up `NULL`. Live ingest not yet run end-to-end against the live mirror — verify with `import-vmmrdb --limit 50` before kicking off the full run.
-- [ ] **4.3** CompCars downloader + label normalizer
+- [~] **4.3** CompCars downloader + label normalizer — ingest module + CLI + 31 tests built against the only HF copy (`JorgeLlorente/CompCars-Repository/Compcars_Data.zip`, raw 16.5 GB ZIP, no `datasets`-streaming API). Custom ingest path: download once via `hf_hub_download`, iterate locally with `zipfile.ZipFile`, resolve integer make_id/model_id via `scipy.io.loadmat` on `misc/make_model_name.mat`. Live smoke deferred — first download attempt got to 13.7 GB then HF Xet throttled; second attempt stalled at 11.2 GB. Need a stable bandwidth window or a separate `import-compcars` run when HF is responsive.
 - [ ] **4.4** Wikimedia Commons fetcher (vintage gap)
 - [ ] **4.5** Unified label schema across all sources
 
