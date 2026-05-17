@@ -42,6 +42,7 @@ seed-queue = "car_lense_engine.crawler.seed.cli:main"
 crawl = "car_lense_engine.crawler.core.cli:main"
 view-label = "car_lense_engine.dataset.cli:main"
 import-stanford-cars = "car_lense_engine.dataset.stanford_cars_cli:main"
+import-vmmrdb = "car_lense_engine.dataset.vmmrdb_cli:main"
 phase5-baseline = "car_lense_engine.eval.cli:main"
 phase5-train = "car_lense_engine.training.cli:main"
 
