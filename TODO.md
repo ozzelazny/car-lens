@@ -40,7 +40,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 ## Phase 5 — Model training (not yet planned in detail)
 
 - [x] **5.1** Baseline: pre-trained MobileCLIP-S2 zero-shot prototype retrieval. Stanford Cars (196 classes, 8,014 test images): **top-1=87.88%, top-3=98.74%, top-5=99.64%, top-10=99.90%**, ~9 min on CPU. Per-view conditioning deferred to 5.2 — single-prototype baseline established first per industry convention.
-- [x] **5.2** Fine-tune MobileCLIP-S2 with hard-negative-weighted CE. Stanford Cars 196 classes, 20 epochs on RTX 5090 (~19 min): **top-1=91.48%, top-5=98.85%** (vs zero-shot baseline 87.88%/99.64%). Best epoch 14. View-conditional retrieval still pending Phase 3.5 view-stratified split.
+- [x] **5.2** Fine-tune MobileCLIP-S2 with hard-negative-weighted CE. Two runs: (a) Stanford Cars 196 classes, 20 epochs on RTX 5090 (~19 min): **top-1=91.48%, top-5=98.85%** (vs zero-shot baseline 87.88%/99.64%); (b) **bucketed CompCars 2,566 classes, 10 epochs, ~74 min**: **top-1=91.93%, top-5=99.24%** — better accuracy on 13× more classes, courtesy of Phase 4.6 year-bucketing + 122k train images + hard-negative weighting. View-conditional retrieval still pending Phase 3.5 view-stratified split.
 - [ ] **5.3** Train the **view classifier** (small head on the same backbone over 5 exterior views + 1 "non-exterior" class).
 - [ ] **5.4** Evaluation harness — held-out test set, top-1/top-5 broken down by `(make, view, era)`; full confusion matrix; per-view accuracy gap analysis.
 - [ ] **5.5** ONNX export (embedder + view classifier) + Core ML + TFLite conversion.
