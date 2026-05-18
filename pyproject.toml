@@ -49,6 +49,7 @@ import-compcars = "car_lense_engine.dataset.compcars_cli:main"
 canonicalize-labels = "car_lense_engine.dataset.canonicalize_cli:main"
 phase5-baseline = "car_lense_engine.eval.cli:main"
 phase5-train = "car_lense_engine.training.cli:main"
+build-prototypes = "car_lense_engine.eval.build_prototypes_cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]

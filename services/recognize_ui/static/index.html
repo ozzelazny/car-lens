@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Car Lense - Recognize</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Car Lense</h1>
+      <p class="tagline">Phase 6.1 prototype - drop a photo, get a make/model/year guess.</p>
+    </header>
+
+    <main>
+      <section id="drop-zone" class="drop-zone" aria-label="Upload car photo">
+        <p class="drop-prompt">
+          Drop a car photo here, or
+          <label class="file-pick" for="file-input">click to choose</label>.
+        </p>
+        <input id="file-input" type="file" accept="image/*" hidden />
+      </section>
+
+      <section id="result" class="result hidden">
+        <div class="preview">
+          <img id="preview-img" alt="Uploaded car" />
+        </div>
+        <div class="predictions">
+          <h2>Top predictions</h2>
+          <ol id="prediction-list"></ol>
+          <p id="elapsed" class="elapsed"></p>
+          <button id="reset-btn" type="button">Try another</button>
+        </div>
+      </section>
+
+      <section id="error" class="error hidden" role="alert"></section>
+    </main>
+
+    <footer>
+      <p>
+        Backend status:
+        <span id="health-status">checking...</span>
+      </p>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

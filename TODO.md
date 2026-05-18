@@ -48,7 +48,7 @@ Recognition engine — Phase 1 (catalog + crawler). No model training yet.
 
 ## Phase 6 — `recognize()` engine interface (not yet planned in detail)
 
-- [ ] **6.1** `recognize()` Python interface — view-detect → view-conditional retrieval → top-K candidates. Reject non-exterior inputs with a clear reason.
+- [~] **6.1** `recognize()` Python interface — view-detect → view-conditional retrieval → top-K candidates. Reject non-exterior inputs with a clear reason. *In progress: FastAPI service container (`services/recognize_api/`) + nginx static UI container (`services/recognize_ui/`) wired via `docker-compose.yml`. `POST /api/recognize` serves top-5 against pre-computed prototypes; `build-prototypes` CLI added for one-time prototype generation from the Phase 5.2 checkpoint. View-detect rejection deferred until Phase 5.3 view classifier ships.*
 - [ ] **6.2** Cloud-LLM re-rank fallback for low-confidence top-1 (threshold TBD post-eval).
 - [ ] **6.3** CLI for one-shot inference + batch evaluation.
 

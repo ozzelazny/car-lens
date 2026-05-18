@@ -1,0 +1,14 @@
+# Narrow runtime deps for the Phase 6.1 recognize() service.
+# Kept separate from the project's pyproject.toml so the container
+# image doesn't pull in crawler / dataset / playwright dependencies.
+#
+# torch is installed from the index passed via --extra-index-url
+# (default: PyTorch CPU wheels). Pinning a single major version per
+# the project's `torch>=2.0` constraint.
+torch>=2.0,<3
+open_clip_torch>=2.20
+pillow>=10.3
+pydantic>=2.7
+fastapi>=0.110
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9

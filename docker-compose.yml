@@ -1,0 +1,53 @@
+# Phase 6.1 -- recognize() service stack.
+#
+# Two containers:
+#   recognize-api: FastAPI + MobileCLIP-S2 fine-tune + prototypes.
+#                  Listens on host port 8000.
+#   recognize-ui : nginx serving the static SPA + proxying /api/* and
+#                  /health to recognize-api. Listens on host 8080.
+#
+# Host-side prerequisites:
+#   * cache/prototypes.pt produced by `build-prototypes` (see top-level
+#     services/README.md).
+#   * models/checkpoints/mobileclip_s2_compcars_epoch09_top1_91.9.pt
+#     produced by Phase 5.2 training.
+#
+# Run:
+#   docker compose up --build
+# then open http://localhost:8080.
+
+services:
+  recognize-api:
+    build:
+      context: .
+      dockerfile: services/recognize_api/Dockerfile
+    image: car-lense/recognize-api:latest
+    container_name: car-lense-api
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_PATH: /app/models/mobileclip_s2_compcars_epoch09_top1_91.9.pt
+      PROTOTYPES_PATH: /app/cache/prototypes.pt
+      DEVICE: cpu
+      LOG_LEVEL: info
+    volumes:
+      - ./models/checkpoints:/app/models:ro
+      - ./db:/app/db:ro
+      - ./cache:/app/cache:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  recognize-ui:
+    build:
+      context: ./services/recognize_ui
+    image: car-lense/recognize-ui:latest
+    container_name: car-lense-ui
+    ports:
+      - "8080:80"
+    depends_on:
+      recognize-api:
+        condition: service_healthy
