@@ -1,11 +1,18 @@
 """VMMRdb dataset ingest (Phase 4.2).
 
-Streams the VMMRdb (Vehicle Make and Model Recognition Database) from a
-Hugging Face mirror via ``datasets.load_dataset``, parses each class string
-into structured ``(year, make, model)`` using
-:mod:`car_lense_engine.dataset.vmmrdb_labels`, and persists each image to
-``data/public/vmmrdb/<class_id>/<sha256>.jpg`` while inserting one synthetic
-listing + one image row per image into the SQLite DB.
+Two parallel ingest paths share the same DB schema and storage convention:
+
+* :func:`import_vmmrdb` — streams a Hugging Face mirror (375 make-model
+  classes, no year) via ``datasets.load_dataset``. Phase 4.2 default.
+* :func:`import_vmmrdb_from_zip` — iterates the full GitHub release ZIP
+  (9,170 classes, year+make+model, ~50 GB) from a local file. Phase 4.2.b
+  full-coverage path; tests use a synthetic mini-ZIP.
+
+Both parse the class string via :mod:`car_lense_engine.dataset.vmmrdb_labels`
+and persist each image to ``<out_dir>/<class_id>/<sha256>.<ext>`` while
+inserting one synthetic listing + one image row per image into the SQLite
+DB. Both record ``source='vmmrdb'`` so downstream stages don't need to
+special-case the two paths.
 
 Design choices (mirror :mod:`stanford_cars`):
 
@@ -42,17 +49,31 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from car_lense_engine.db import images, listings
 from car_lense_engine.db.models import Image, Listing
 
 from .vmmrdb_labels import VmmrdbLabel, VmmrdbParseError, parse_class
 
+if TYPE_CHECKING:
+    import zipfile as _zipfile_t
+
 logger = logging.getLogger(__name__)
 
 _SOURCE: str = "vmmrdb"
 _JPEG_QUALITY: int = 95
+
+# Recognised top-level prefixes inside the full-release VMMRdb ZIP. The
+# original GitHub release packages everything under ``VMMRdb/``; some
+# re-uploads ship as ``VMMRdb_master/`` or even with no prefix at all.
+# We strip whichever prefix is present so the class-dir parser sees just
+# ``<class_dir>/<image_id>.<ext>``.
+_KNOWN_ZIP_PREFIXES: tuple[str, ...] = ("VMMRdb/", "VMMRdb_master/")
+
+# Image extensions accepted from the full-release ZIP. Lowercased before
+# comparison so ``.JPG`` etc. still match.
+_IMAGE_EXTS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
 
 
 @dataclass(frozen=True)
@@ -235,6 +256,205 @@ def import_vmmrdb(
         stats.inserted_images,
         stats.skipped_existing,
         stats.skipped_parse_failures,
+    )
+    return stats
+
+
+def import_vmmrdb_from_zip(
+    *,
+    conn: sqlite3.Connection,
+    zip_path: pathlib.Path,
+    out_dir: pathlib.Path,
+    split: str = "train",
+    limit: int | None = None,
+    log_every: int = 1000,
+    dry_run: bool = False,
+) -> ImportStats:
+    """Ingest the full-release VMMRdb ZIP (9,170 classes) from a local file.
+
+    The full release (291,752 images, ~50 GB) is distributed as a single ZIP
+    via Dropbox. The HF mirrors (``venetis/VMMRdb_make_model_*``) only carry
+    375 make-model classes (no year), so this path is necessary to get the
+    full year+make+model labels.
+
+    Entries inside the archive look like
+    ``VMMRdb/<class_dir>/<image_id>.jpg`` where ``<class_dir>`` is e.g.
+    ``honda_civic_2005`` (year-suffix) or ``acura_cl`` (no-year). The exact
+    top-level prefix varies between re-uploads (``VMMRdb/`` vs
+    ``VMMRdb_master/`` vs none); :data:`_KNOWN_ZIP_PREFIXES` strips
+    whichever applies.
+
+    Parameters
+    ----------
+    conn:
+        Open SQLite connection (migrations applied).
+    zip_path:
+        Path to the pre-downloaded full-release ZIP on disk.
+    out_dir:
+        Root directory where images will be written. Typically
+        ``data/public/vmmrdb_full``.
+    split:
+        Semantic split tag recorded in ``listings.split``. The full release
+        has no pre-defined split; the caller picks whatever tag they want
+        downstream training joins to filter on.
+    limit:
+        If given, stop after this many image entries have been *processed*.
+        Useful for smoke tests.
+    log_every:
+        Emit a progress log line every ``log_every`` processed rows.
+    dry_run:
+        If ``True``, count rows but write nothing to disk and insert no
+        rows. Useful for archive shape probes.
+
+    Returns
+    -------
+    ImportStats
+        Per-run counters. ``processed`` counts every image entry pulled
+        from the archive; the rest are decomposed sub-counts.
+    """
+    if log_every <= 0:
+        raise ValueError(f"log_every must be > 0, got {log_every!r}")
+    if limit is not None and limit <= 0:
+        raise ValueError(f"limit must be > 0 or None, got {limit!r}")
+
+    zip_path = pathlib.Path(zip_path)
+    if not zip_path.exists():
+        raise FileNotFoundError(f"VMMRdb ZIP not found: {zip_path}")
+
+    out_dir = pathlib.Path(out_dir)
+    if not dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    zipfile = _import_zipfile()
+    logger.info(
+        "vmmrdb: opening full-release archive %s (dry_run=%s)",
+        zip_path,
+        dry_run,
+    )
+
+    processed = 0
+    inserted_listings = 0
+    inserted_images = 0
+    skipped_existing = 0
+    skipped_parse_failures = 0
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for entry in zf.infolist():
+            if _skip_zip_entry(entry):
+                continue
+
+            class_dir = _class_dir_from_entry(entry.filename)
+            if class_dir is None:
+                # Not an image entry (top-level file, README, etc.).
+                continue
+
+            if limit is not None and processed >= limit:
+                break
+            processed += 1
+
+            try:
+                label = parse_class(class_dir)
+            except VmmrdbParseError as exc:
+                skipped_parse_failures += 1
+                logger.warning(
+                    "vmmrdb: parse failure (skipped): entry=%r err=%s",
+                    entry.filename,
+                    exc,
+                )
+                _maybe_log_progress(
+                    processed,
+                    inserted_listings,
+                    inserted_images,
+                    skipped_existing,
+                    skipped_parse_failures,
+                    log_every,
+                )
+                continue
+
+            if dry_run:
+                _maybe_log_progress(
+                    processed,
+                    inserted_listings,
+                    inserted_images,
+                    skipped_existing,
+                    skipped_parse_failures,
+                    log_every,
+                )
+                continue
+
+            body = zf.read(entry.filename)
+            image_id = hashlib.sha256(body).hexdigest()
+
+            class_id = _class_id_for(label)
+            ext = _normalise_ext(entry.filename)
+            target_path = out_dir / class_id / f"{image_id}{ext}"
+
+            listing_id = f"vmmrdb:{image_id}"
+
+            # Idempotency: if the image row already exists, skip the whole
+            # row. We still ensure the file is on disk in case the previous
+            # run crashed between write + insert.
+            if images.get_image_by_sha(conn, image_id) is not None:
+                skipped_existing += 1
+                _maybe_log_progress(
+                    processed,
+                    inserted_listings,
+                    inserted_images,
+                    skipped_existing,
+                    skipped_parse_failures,
+                    log_every,
+                )
+                continue
+
+            _atomic_write_bytes(target_path, body)
+
+            listing_inserted = _insert_listing_if_new(
+                conn,
+                listing_id=listing_id,
+                class_id=class_id,
+                image_id=image_id,
+                label=label,
+                split=split,
+            )
+            if listing_inserted:
+                inserted_listings += 1
+
+            image_inserted = _insert_image_if_new(
+                conn,
+                image_id=image_id,
+                listing_id=listing_id,
+                class_id=class_id,
+                target_path=target_path,
+                byte_count=len(body),
+            )
+            if image_inserted:
+                inserted_images += 1
+
+            _maybe_log_progress(
+                processed,
+                inserted_listings,
+                inserted_images,
+                skipped_existing,
+                skipped_parse_failures,
+                log_every,
+            )
+
+    stats = ImportStats(
+        processed=processed,
+        inserted_listings=inserted_listings,
+        inserted_images=inserted_images,
+        skipped_existing=skipped_existing,
+        skipped_parse_failures=skipped_parse_failures,
+    )
+    logger.info(
+        "vmmrdb: done (zip): processed=%d inserted_listings=%d inserted_images=%d "
+        "skipped_existing=%d skipped_parse_failures=%d dry_run=%s",
+        stats.processed,
+        stats.inserted_listings,
+        stats.inserted_images,
+        stats.skipped_existing,
+        stats.skipped_parse_failures,
+        dry_run,
     )
     return stats
 
@@ -475,3 +695,96 @@ def _log_progress(
         skipped_existing,
         skipped_parse_failures,
     )
+
+
+def _maybe_log_progress(
+    processed: int,
+    inserted_listings: int,
+    inserted_images: int,
+    skipped_existing: int,
+    skipped_parse_failures: int,
+    log_every: int,
+) -> None:
+    """Emit a progress log line every ``log_every`` processed rows."""
+    if processed % log_every != 0:
+        return
+    _log_progress(
+        processed,
+        inserted_listings,
+        inserted_images,
+        skipped_existing,
+        skipped_parse_failures,
+    )
+
+
+def _import_zipfile() -> Any:
+    """Lazy-import the stdlib ``zipfile`` module."""
+    import zipfile  # noqa: PLC0415
+
+    return zipfile
+
+
+def _skip_zip_entry(entry: _zipfile_t.ZipInfo) -> bool:
+    """Return True if the ZIP entry should be skipped before path parsing.
+
+    Skips:
+
+    * directory entries (filenames ending in ``/``),
+    * hidden / metadata entries (any path segment starting with ``.``,
+      including macOS ``__MACOSX/`` resource-fork directories),
+    * empty filenames.
+    """
+    name = entry.filename
+    if not name:
+        return True
+    if name.endswith("/"):
+        return True
+    # ``__MACOSX/`` is a hidden resource-fork dir that macOS Finder injects
+    # when zipping; entries under it are not real images.
+    if name.startswith("__MACOSX/") or "/__MACOSX/" in name:
+        return True
+    return any(segment.startswith(".") for segment in name.split("/"))
+
+
+def _strip_zip_prefix(entry_name: str) -> str:
+    """Strip a recognised top-level VMMRdb prefix from a ZIP entry path.
+
+    The full release ships under ``VMMRdb/``; some re-uploads use
+    ``VMMRdb_master/``; a hand-zipped extract may have no prefix. We strip
+    the longest matching prefix from :data:`_KNOWN_ZIP_PREFIXES`, then
+    return whatever's left.
+    """
+    for prefix in _KNOWN_ZIP_PREFIXES:
+        if entry_name.startswith(prefix):
+            return entry_name[len(prefix) :]
+    return entry_name
+
+
+def _class_dir_from_entry(entry_name: str) -> str | None:
+    """Extract the ``<class_dir>`` token from an image entry path, or None.
+
+    Expected stripped path shape is ``<class_dir>/<image_id>.<ext>``. Returns
+    ``None`` if the entry is not a recognised image (wrong extension) or
+    doesn't carry a class-dir component (top-level file).
+    """
+    stripped = _strip_zip_prefix(entry_name)
+    if "/" not in stripped:
+        return None
+    head, _, tail = stripped.rpartition("/")
+    if not tail:
+        return None
+    ext = pathlib.Path(tail).suffix.lower()
+    if ext not in _IMAGE_EXTS:
+        return None
+    # Class dir is the path segment immediately preceding the filename.
+    # Any deeper nesting (rare; mostly hand-extracted zips) is collapsed to
+    # the *last* directory component, which is the per-class folder.
+    class_dir = head.rsplit("/", 1)[-1]
+    if not class_dir:
+        return None
+    return class_dir
+
+
+def _normalise_ext(entry_name: str) -> str:
+    """Return the lowercased extension (with leading ``.``) for the entry."""
+    return pathlib.Path(entry_name).suffix.lower()

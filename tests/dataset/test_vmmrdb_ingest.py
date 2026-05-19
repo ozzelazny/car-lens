@@ -3,12 +3,18 @@
 The HF ``datasets`` library is stubbed via ``monkeypatch`` so tests never
 hit the network. Each fake row is a ``{"image": PIL.Image, "label": int}``
 dict — matching the schema of the ``venetis/VMMRdb_make_model_*`` mirror.
+
+The local-ZIP path is exercised against synthetic mini-ZIPs that mirror
+the on-disk layout of the full VMMRdb GitHub release
+(``<prefix>/<class_dir>/<image_id>.jpg``).
 """
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import zipfile
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -20,6 +26,7 @@ PIL_Image = pytest.importorskip("PIL.Image")
 from car_lense_engine.dataset.vmmrdb import (  # noqa: E402
     ImportStats,
     import_vmmrdb,
+    import_vmmrdb_from_zip,
 )
 from car_lense_engine.db import images, listings, open_db  # noqa: E402
 
@@ -521,3 +528,352 @@ def test_ingest_venetis_mirror_forces_train_split(
     rl = listings.list_by_class(db, source="vmmrdb")
     assert len(rl) == 1
     assert rl[0].split == "val"
+
+
+# --------------------------------------------------------- full-release ZIP
+
+
+def _jpeg_bytes(color: tuple[int, int, int], size: tuple[int, int] = (16, 16)) -> bytes:
+    """Encode a tiny solid-color PIL image as JPEG bytes."""
+    img = PIL_Image.new("RGB", size, color)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+def _build_vmmrdb_zip(
+    path: Path,
+    *,
+    entries: list[tuple[str, bytes]],
+) -> None:
+    """Write a synthetic VMMRdb-shaped ZIP to ``path``.
+
+    ``entries`` is a list of ``(in_zip_path, body_bytes)`` tuples. The
+    in-zip path should already include whatever top-level prefix the test
+    is exercising (e.g. ``VMMRdb/honda_civic_2005/img1.jpg``).
+    """
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
+        for name, body in entries:
+            zf.writestr(name, body)
+
+
+def test_ingest_from_zip_happy_path(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Two entries: one year-suffix class, one no-year class — both ingested."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("VMMRdb/acura_cl/img2.jpg", _jpeg_bytes((0, 255, 0))),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+    )
+
+    assert stats == ImportStats(
+        processed=2,
+        inserted_listings=2,
+        inserted_images=2,
+        skipped_existing=0,
+        skipped_parse_failures=0,
+    )
+
+    rl = listings.list_by_class(db, source="vmmrdb")
+    assert len(rl) == 2
+    by_model = {row.model: row for row in rl}
+    assert by_model["civic"].make == "honda"
+    assert by_model["civic"].year == 2005
+    assert by_model["cl"].make == "acura"
+    assert by_model["cl"].year is None
+
+    # Files are on disk under per-class subdirs with sha256 stems.
+    written = list(out_dir.rglob("*.jpg"))
+    assert len(written) == 2
+    for p in written:
+        assert len(p.stem) == 64
+
+    # Image rows point at the written files.
+    for row in rl:
+        assert row.split == "train"
+        img_rows = images.list_for_listing(db, row.listing_id)
+        assert len(img_rows) == 1
+        assert Path(img_rows[0].local_path).exists()
+        assert img_rows[0].position == 1
+
+
+def test_ingest_from_zip_skips_non_image_entries(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Non-image entries (txt files, READMEs, directories) are silently skipped."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("VMMRdb/README.txt", b"this is not an image"),
+            ("VMMRdb/honda_civic_2005/notes.txt", b"side note"),
+            ("VMMRdb/acura_cl/img2.jpg", _jpeg_bytes((0, 255, 0))),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+    )
+
+    # Only the two JPEGs are counted as processed.
+    assert stats.processed == 2
+    assert stats.inserted_images == 2
+    assert stats.skipped_parse_failures == 0
+
+
+def test_ingest_from_zip_handles_unknown_prefix(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Entries under VMMRdb_master/, no prefix, or VMMRdb/ all parse correctly."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb_master/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("acura_cl/img2.jpg", _jpeg_bytes((0, 255, 0))),
+            ("VMMRdb/ford_f-150_2010/img3.jpg", _jpeg_bytes((0, 0, 255))),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+    )
+
+    assert stats.processed == 3
+    assert stats.inserted_images == 3
+    assert stats.skipped_parse_failures == 0
+
+    rl = listings.list_by_class(db, source="vmmrdb")
+    assert {row.model for row in rl} == {"civic", "cl", "f-150"}
+    by_model = {row.model: row for row in rl}
+    assert by_model["civic"].year == 2005
+    assert by_model["cl"].year is None
+    assert by_model["f-150"].year == 2010
+
+
+def test_ingest_from_zip_idempotent(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Re-running over the same ZIP inserts nothing new."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("VMMRdb/acura_cl/img2.jpg", _jpeg_bytes((0, 255, 0))),
+        ],
+    )
+
+    first = import_vmmrdb_from_zip(conn=db, zip_path=zip_path, out_dir=out_dir)
+    assert first.inserted_images == 2
+
+    second = import_vmmrdb_from_zip(conn=db, zip_path=zip_path, out_dir=out_dir)
+    assert second.processed == 2
+    assert second.inserted_listings == 0
+    assert second.inserted_images == 0
+    assert second.skipped_existing == 2
+
+
+def test_ingest_from_zip_dry_run_writes_nothing(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """``dry_run=True`` counts rows but writes no files and inserts no rows."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("VMMRdb/acura_cl/img2.jpg", _jpeg_bytes((0, 255, 0))),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+        dry_run=True,
+    )
+
+    assert stats.processed == 2
+    assert stats.inserted_listings == 0
+    assert stats.inserted_images == 0
+
+    # No files were extracted.
+    if out_dir.exists():
+        assert list(out_dir.rglob("*.jpg")) == []
+
+    # No DB rows were inserted.
+    rl = listings.list_by_class(db, source="vmmrdb")
+    assert rl == []
+
+
+def test_ingest_from_zip_limit_caps_processing(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """``limit=2`` stops the iterator after processing 2 image entries."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            (f"VMMRdb/honda_civic_2005/img{i}.jpg", _jpeg_bytes((i * 30, 0, 0))) for i in range(5)
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+        limit=2,
+    )
+
+    assert stats.processed == 2
+    assert stats.inserted_images == 2
+
+
+def test_ingest_from_zip_skips_parse_failures(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Entries whose class-dir token can't be parsed are counted but skipped."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            # Class dir with no underscore -> parse failure.
+            ("VMMRdb/banana/img2.jpg", _jpeg_bytes((128, 128, 128))),
+            ("VMMRdb/acura_cl/img3.jpg", _jpeg_bytes((0, 0, 255))),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+    )
+
+    assert stats.processed == 3
+    assert stats.inserted_images == 2
+    assert stats.skipped_parse_failures == 1
+
+
+def test_ingest_from_zip_missing_file_rejected(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FileNotFoundError):
+        import_vmmrdb_from_zip(
+            conn=db,
+            zip_path=tmp_path / "no_such.zip",
+            out_dir=out_dir,
+        )
+
+
+def test_ingest_from_zip_invalid_limit_rejected(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(zip_path, entries=[])
+    with pytest.raises(ValueError):
+        import_vmmrdb_from_zip(
+            conn=db,
+            zip_path=zip_path,
+            out_dir=out_dir,
+            limit=0,
+        )
+
+
+def test_ingest_from_zip_invalid_log_every_rejected(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(zip_path, entries=[])
+    with pytest.raises(ValueError):
+        import_vmmrdb_from_zip(
+            conn=db,
+            zip_path=zip_path,
+            out_dir=out_dir,
+            log_every=0,
+        )
+
+
+def test_ingest_from_zip_records_provided_split(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """The semantic ``split`` kwarg is recorded in ``listings.split``."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0)))],
+    )
+    import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+        split="val",
+    )
+    rl = listings.list_by_class(db, source="vmmrdb")
+    assert len(rl) == 1
+    assert rl[0].split == "val"
+
+
+def test_ingest_from_zip_skips_hidden_and_macosx(
+    db: sqlite3.Connection,
+    out_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """``__MACOSX/`` resource-forks and hidden ``.foo`` entries are skipped."""
+    zip_path = tmp_path / "vmmrdb.zip"
+    _build_vmmrdb_zip(
+        zip_path,
+        entries=[
+            ("VMMRdb/honda_civic_2005/img1.jpg", _jpeg_bytes((255, 0, 0))),
+            ("__MACOSX/VMMRdb/honda_civic_2005/._img1.jpg", b"macos junk"),
+            ("VMMRdb/.DS_Store", b"finder junk"),
+        ],
+    )
+
+    stats = import_vmmrdb_from_zip(
+        conn=db,
+        zip_path=zip_path,
+        out_dir=out_dir,
+    )
+
+    assert stats.processed == 1
+    assert stats.inserted_images == 1
+    assert stats.skipped_parse_failures == 0
