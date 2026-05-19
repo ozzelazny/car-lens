@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "car-lense-engine"
+name = "car-lens-engine"
 version = "0.0.1"
-description = "Offline data + training pipeline for the Car Lense vehicle-recognition app"
+description = "Offline data + training pipeline for the Car Lens vehicle-recognition app"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12",
