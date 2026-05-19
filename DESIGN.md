@@ -39,10 +39,10 @@ This document covers `engine/`.
 
 The engine produces four deployable artifacts:
 
-1. **Image encoder model** — MobileCLIP-S2 fine-tuned on car data. Exported to ONNX, then converted to Core ML (iOS) and TFLite (Android). Inference target: <30ms on mid-range mobile.
-2. **View classifier** — small head over the same backbone that routes an input image to one of `{front, rear, side, three-quarter-front, three-quarter-rear, non-exterior}`. Inference target: <5ms; non-exterior inputs are rejected ("please photograph the car from outside").
-3. **Class catalog** — for each `(make, model, generation)`, **one prototype embedding per exterior view** (~5 views × ~2,000 classes ≈ 10k prototypes, ~25 MB). Distributed with the app.
-4. **`recognize()` interface** — Python module used by tests, evaluation, and (initially) a thin cloud API. Same logical contract as the on-device code.
+1. **Image encoder model** — **MobileCLIP-B** fine-tuned on car data (originally targeted MobileCLIP-S2; upgraded after MobileCLIP-S2's 5-epoch combined-corpus run hit only 75.67% test top-1 on 6,423 classes — B at the same epochs delivered +11.8 pp). 224×224 input, 512-dim embedding, L2-normalized in the exported graph. Trained checkpoint at `models/checkpoints/mobileclip_b_compcars-vmmrdb-stanford_cars_resumed_epoch09_top1_85.7.pt` (val_top1=85.66%, test_top1=81.07% / top-5=98.10%). Exported to ONNX → Core ML FP16 (165 MB `.mlpackage`) → TFLite (currently blocked by an `onnx2tf` segfault; ORT-Mobile fallback path retained). Inference target <30 ms on mid-range Android, <10 ms on iPhone 13+ NPU.
+2. **View classifier** — **binary `exterior` / `non-exterior` head** over the same backbone for input gating (val_top1=99.88%). The original 5-way view classifier (front/rear/side/3Q-front/3Q-rear) was abandoned at val_top1=72.5% — the labels themselves (zero-shot CLIP) are noisy on the 3Q-front vs 3Q-rear distinction, and a 72.5% gate would route ~27% of queries to the wrong view's prototypes. Binary mode does input rejection only; retrieval stays single-prototype.
+3. **Class catalog** — **6,423 (year-bucketed-make-model)** classes covering compcars + vmmrdb + stanford_cars (US-skewed: Ford 46k, Chevrolet 42k, Toyota 29k, Honda 26k). **Single prototype per class** (512-dim FP16, ~6.5 MB total) — view-conditional prototypes infrastructure exists (`build-prototypes --per-view` → schema-v2 cache) but is deferred until the view classifier is accurate enough to gate retrieval (>90% per design rule of thumb).
+4. **`recognize()` interface** — Python module used by tests, evaluation, and the cloud API (`services/recognize_api/`). Same logical contract as the on-device code. iOS MVP scaffold under `app/ios/CarLense/` reproduces the same flow on-device with SwiftUI + AVFoundation + Vision + Core ML.
 
 ```python
 recognize(image: PIL.Image) -> list[Match]
@@ -54,11 +54,11 @@ recognize(image: PIL.Image) -> list[Match]
 
 Accuracy is the primary product priority. The architecture reflects:
 
-- **View-conditional retrieval**: query embedding is compared only against prototypes of the *same view* (front-Civic vs front-Camry, not front-Civic vs side-Camry). Removes a major source of confusion in single-prototype CLIP retrieval.
-- **Exterior-only v1**: interior recognition is doable but lower-ceiling (~70–80% vs ~93–95% top-1) and not shipping in v1. Interior images are *not* discarded from disk — they're labeled and excluded from training, so an "interior path" can be added in v1.1 as an additive feature with no API changes.
-- **Hard-negative mining** during fine-tune: the loss explicitly contrasts visually similar but different classes (Camry vs Accord, F-150 vs Silverado, Civic vs Corolla) so the model learns the discriminative features rather than overall body shape.
-- **Cloud-LLM re-rank fallback** for low-confidence cases: when on-device top-1 confidence < threshold (TBD post-eval), the top-K candidates plus the image go to the cloud LLM for a finer judgment. Preserves the "online enrichment" assumption already in the system architecture.
-- **Latency budget** stays ~30 ms on-device for the embedder + ~5 ms for the view classifier. If post-eval shows the smaller MobileCLIP-S1 closes most of the gap on the larger MobileCLIP-B with much lower latency, we'll evaluate the trade-off before final export.
+- **View-conditional retrieval** *(deferred — infrastructure shipped, not currently enabled)*: original plan compared query embedding only against same-view prototypes. Abandoned in favor of single-prototype retrieval because the 5-way view classifier only hit 72.5% accuracy on label-noisy zero-shot training data — mis-routing 27% of queries to the wrong view's prototypes regressed end-to-end accuracy. `build_prototypes_by_view` + recognize-api's v2 path are kept for future re-activation if/when a more accurate view classifier ships.
+- **Exterior-only v1** *(enforced via binary classifier gate)*: interior recognition is doable but lower-ceiling (~70–80% vs ~93–95% top-1) and not shipping in v1. Interior images are labeled and excluded from class-level training; the binary `non-exterior` classifier (99.88% val) gates inputs at the API boundary.
+- **Hard-negative mining** during fine-tune: the loss explicitly contrasts visually similar but different classes (Camry vs Accord, F-150 vs Silverado, Civic vs Corolla) so the model learns discriminative features. Verified by today's eval — remaining top-1 misses are now overwhelmingly within-make trim/year-bucket adjacencies (Impala 04-07 vs 08-11, Civic vs Civic_Coupe), not cross-make confusions.
+- **Cloud-LLM re-rank fallback** for low-confidence cases: when on-device top-1 confidence < threshold (default 0.5), the image + top-5 candidate names go to Claude via the Anthropic Messages API for a finer judgment. Code shipped (Phase 6.2 — `services/recognize_api/llm_rerank.py`); env-flag-gated. Top-5 at 98.10% means effective top-1 with re-rank should land ~92-94%.
+- **Latency budget** stays ~30 ms on-device for the embedder. MobileCLIP-B is ~10 ms on iPhone NPU, ~30 ms on flagship Android — fits. App bundle ~172 MB with FP16 weights (vs MobileCLIP-S2's ~80 MB) — accepted trade for +11.8 pp test top-1.
 
 ## Recognition engine — pipeline
 
@@ -95,9 +95,10 @@ NHTSA vPIC ──► canonical catalog (year, make, model, trim)
    (class, view) — no view leaks across splits
                        │
                        ▼
-   MobileCLIP-S2 fine-tune with view-conditional
-   contrastive loss + hard-negative mining
-   (Camry↔Accord, F-150↔Silverado, etc.)
+   MobileCLIP-B fine-tune (resumed +10 epochs)
+   with hard-negative-weighted CE
+   (single-prototype retrieval; view-conditional
+   infra retained but not enabled)
                        │
                        ▼
    evaluation harness: top-1 / top-5 per
