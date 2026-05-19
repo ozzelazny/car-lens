@@ -1,0 +1,72 @@
+name: CarLense
+
+options:
+  bundleIdPrefix: com.ashzelazny
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Pillar: Core ML compiles .mlpackage at build time into Foo.mlmodelc inside the app bundle.
+    # We don't compile manually; Xcode handles it from the resource added to the target.
+    COREML_CODEGEN_LANGUAGE: Swift
+
+targets:
+  CarLense:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: CarLense
+        excludes:
+          - "Resources/**"          # Resources handled below so .mlpackage is added as a folder reference
+    # Resources need to be listed individually so Xcode compiles the .mlpackage
+    # (a folder treated as a single resource) rather than copying it as a
+    # raw directory. Listing a folder reference here would copy bytes-as-is
+    # and Core ML would fail to load at runtime.
+    #
+    # If any of these files are missing when the user builds, the build fails
+    # with a clear "Build input file cannot be found" error pointing at the
+    # missing asset, which is the right failure mode.
+    resources:
+      - path: CarLense/Resources/model.mlpackage
+        optional: true
+      - path: CarLense/Resources/prototypes.bin
+        optional: true
+      - path: CarLense/Resources/class_names.json
+        optional: true
+      - path: CarLense/Resources/preprocessing.json
+        optional: true
+    info:
+      path: CarLense/Info.plist
+      properties:
+        CFBundleDisplayName: Car Lense
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        NSCameraUsageDescription: "Car Lense uses the camera to identify cars in real time."
+        UILaunchScreen:
+          UIColorName: ""
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arm64
+          - video-camera
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ashzelazny.carlense
+        PRODUCT_NAME: CarLense
+        DEVELOPMENT_TEAM: ""        # <-- Fill this in via Xcode "Signing & Capabilities"
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"  # iPhone only
+        ENABLE_BITCODE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

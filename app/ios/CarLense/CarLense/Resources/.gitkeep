@@ -1,0 +1,13 @@
+# This directory is intentionally empty in version control.
+#
+# Before building the iOS app, populate it with the latest mobile bundle from
+# the engine's `dist/ios/`:
+#
+#   cp -R dist/ios/model.mlpackage      app/ios/CarLense/CarLense/Resources/
+#   cp    dist/ios/prototypes.bin       app/ios/CarLense/CarLense/Resources/
+#   cp    dist/ios/class_names.json     app/ios/CarLense/CarLense/Resources/
+#   cp    dist/ios/preprocessing.json   app/ios/CarLense/CarLense/Resources/
+#
+# These files are gitignored via the repo-level `.gitignore` (dist/ stays out
+# of git). The .gitkeep keeps the directory itself present so Xcode's folder
+# reference doesn't break.
