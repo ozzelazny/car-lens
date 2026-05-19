@@ -17,6 +17,7 @@ Source = Literal[
     "stanford_cars",
     "vmmrdb",
     "compcars",
+    "wikimedia_commons",
 ]
 
 QueueKind = Literal["search", "listing", "image"]
@@ -67,6 +68,9 @@ class Image(_Base):
     view: str | None = None
     view_score: float | None = None
     view_labeled_at: datetime | None = None
+    # Train/val/test split assignment from Phase 3.5; NULL for non-exterior
+    # rows excluded from training.
+    split: str | None = None
 
 
 class QueueItem(_Base):

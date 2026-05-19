@@ -20,6 +20,8 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (7, "007_source_compcars.sql"),
     (8, "008_canonical_labels.sql"),
     (9, "009_generation_year.sql"),
+    (10, "010_images_split.sql"),
+    (11, "011_source_wikimedia.sql"),
 ]
 
 
