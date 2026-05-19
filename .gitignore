@@ -42,3 +42,13 @@ catalog/cache/
 
 # Evaluation reports — regenerable via `phase5-baseline` / future eval CLIs.
 reports/
+
+# Prototype caches — regenerable via `build-prototypes`. Tens of MB each.
+cache/
+
+# Mobile export artifacts — regenerable via `export-mobile`. ONNX is ~345 MB.
+dist/
+
+# iOS app bundled resources (copied from dist/ios/ before each Xcode build).
+app/ios/CarLense/CarLense/Resources/*
+!app/ios/CarLense/CarLense/Resources/.gitkeep
