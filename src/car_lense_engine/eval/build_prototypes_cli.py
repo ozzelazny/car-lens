@@ -11,12 +11,16 @@ service mounts read-only.
 Invoke via the ``build-prototypes`` entry point declared in
 ``pyproject.toml``::
 
-    build-prototypes [--db PATH] [--source compcars]
+    build-prototypes [--db PATH] [--source compcars[,vmmrdb,...]]
                      [--train-split train]
                      [--checkpoint PATH]
                      [--model MobileCLIP-S2] [--pretrained datacompdr]
                      [--device cpu|cuda|mps] [--batch-size N]
                      [--output PATH] [-v]
+
+The ``--source`` flag accepts one or more comma-separated source names
+(e.g. ``compcars,vmmrdb,stanford_cars``) so the prototype cache can
+span every dataset the deployed model was trained on.
 
 The output is a torch state dict with four keys:
 
@@ -42,7 +46,7 @@ from typing import Any
 from car_lense_engine.dataset.canonical_labels import generation_label
 from car_lense_engine.db import open_db
 
-from .baseline import BaselineConfig, build_prototypes
+from .baseline import EXTERIOR_VIEWS, BaselineConfig, build_prototypes, build_prototypes_by_view
 
 DEFAULT_DB = Path("db/crawl.sqlite")
 DEFAULT_SOURCE = "compcars"
@@ -52,9 +56,23 @@ DEFAULT_PRETRAINED = "datacompdr"
 DEFAULT_DEVICE = "cpu"
 DEFAULT_BATCH_SIZE = 64
 DEFAULT_OUTPUT = Path("cache/prototypes.pt")
+DEFAULT_OUTPUT_PER_VIEW = Path("cache/prototypes_by_view.pt")
 DEVICE_CHOICES: tuple[str, ...] = ("cpu", "cuda", "mps")
+PROTOTYPE_SCHEMA_V2 = 2
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_sources(raw: str) -> list[str]:
+    """Parse a comma-separated ``--source`` argument into a non-empty list.
+
+    Empty / whitespace-only entries (e.g. from a stray trailing comma)
+    are dropped. Raises :class:`ValueError` if the final list is empty.
+    """
+    items = [s.strip() for s in raw.split(",") if s.strip()]
+    if not items:
+        raise ValueError("at least one non-empty source is required")
+    return items
 
 
 def _display_name_for(class_id: str) -> str:
@@ -105,7 +123,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--source",
         type=str,
         default=DEFAULT_SOURCE,
-        help=f"listings.source to build prototypes from (default: {DEFAULT_SOURCE})",
+        help=(
+            "one or more comma-separated ``listings.source`` values to "
+            f"build prototypes from (default: {DEFAULT_SOURCE}). Examples: "
+            "`compcars`, `compcars,vmmrdb`, "
+            "`compcars,vmmrdb,stanford_cars`."
+        ),
     )
     parser.add_argument(
         "--train-split",
@@ -151,8 +174,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=Path,
-        default=DEFAULT_OUTPUT,
-        help=f"path for the prototypes .pt file (default: {DEFAULT_OUTPUT})",
+        default=None,
+        help=(
+            f"path for the prototypes .pt file "
+            f"(default: {DEFAULT_OUTPUT} for single-prototype mode, "
+            f"{DEFAULT_OUTPUT_PER_VIEW} for --per-view)"
+        ),
+    )
+    parser.add_argument(
+        "--per-view",
+        action="store_true",
+        help=(
+            "build one prototype per (class, view) for the 5 exterior views "
+            "(Phase 6.1 view-conditional retrieval). Non-exterior images "
+            "are dropped at selection time. Output payload is v2 with a "
+            "``prototypes_by_view`` dict; default output path is "
+            f"{DEFAULT_OUTPUT_PER_VIEW} to avoid clobbering the v1 cache."
+        ),
     )
     parser.add_argument(
         "-v",
@@ -180,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
 
+    try:
+        sources = _parse_sources(args.source)
+    except ValueError as exc:
+        parser.error(f"--source: {exc}")
+
     checkpoint_path: Path | None = args.checkpoint
     if checkpoint_path is not None and not checkpoint_path.exists():
         parser.error(f"--checkpoint path does not exist: {checkpoint_path}")
@@ -192,32 +235,98 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_path=checkpoint_path,
     )
 
+    # Pick the default output path based on the mode (per-view writes to
+    # a separate file so it never clobbers the v1 single-prototype cache
+    # the legacy service path still expects).
+    output_path: Path
+    if args.output is not None:
+        output_path = args.output
+    elif args.per_view:
+        output_path = DEFAULT_OUTPUT_PER_VIEW
+    else:
+        output_path = DEFAULT_OUTPUT
+
     conn = open_db(db_path)
     try:
-        class_ids, proto_tensor = build_prototypes(
-            conn=conn,
-            config=config,
-            source=args.source,
-            split=args.train_split,
-        )
+        if args.per_view:
+            class_ids, prototypes_by_view = build_prototypes_by_view(
+                conn=conn,
+                config=config,
+                source=sources,
+                split=args.train_split,
+            )
+        else:
+            class_ids, proto_tensor = build_prototypes(
+                conn=conn,
+                config=config,
+                source=sources,
+                split=args.train_split,
+            )
     finally:
         conn.close()
 
     if not class_ids:
         parser.error(
             f"no prototypes built -- no eligible train rows for "
-            f"source={args.source!r} split={args.train_split!r}; "
+            f"source={sources!r} split={args.train_split!r}; "
             "run canonicalize-labels first and verify the DB has data"
         )
 
     import torch  # noqa: PLC0415
 
     display_names = [_display_name_for(cid) for cid in class_ids]
+    payload: dict[str, Any]
+    if args.per_view:
+        # Move every per-view tensor to CPU so the .pt file is portable.
+        proto_by_view_cpu: dict[str, Any] = {
+            view: prototypes_by_view[view].detach().to("cpu") for view in EXTERIOR_VIEWS
+        }
+        # Determine the embed dim from any non-empty view tensor.
+        embed_dim = 0
+        for view in EXTERIOR_VIEWS:
+            shape = proto_by_view_cpu[view].shape
+            if len(shape) >= 2 and int(shape[1]) > 0:
+                embed_dim = int(shape[1])
+                break
+        payload = {
+            "schema_version": PROTOTYPE_SCHEMA_V2,
+            "class_ids": list(class_ids),
+            "display_names": display_names,
+            "prototypes_by_view": proto_by_view_cpu,
+            "view_names": list(EXTERIOR_VIEWS),
+            "config": {
+                "model": args.model,
+                "pretrained": args.pretrained,
+                "embed_dim": embed_dim,
+                "source": ",".join(sources),
+                "split": args.train_split,
+                "checkpoint_path_used": (
+                    str(checkpoint_path) if checkpoint_path is not None else None
+                ),
+                "built_at": dt.datetime.now(dt.UTC).isoformat(),
+            },
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, output_path)
+        view_counts = {
+            view: int(
+                (proto_by_view_cpu[view].norm(dim=-1) > 0).sum().item()
+                if int(proto_by_view_cpu[view].shape[0]) > 0
+                else 0
+            )
+            for view in EXTERIOR_VIEWS
+        }
+        print(
+            f"build-prototypes: wrote per-view prototypes for {len(class_ids)} classes "
+            f"(embed_dim={embed_dim}) to {output_path}; "
+            f"populated rows per view: {view_counts}"
+        )
+        return 0
+
     # Always serialize on CPU so the .pt file is portable between
     # GPU-built (faster) and CPU-served (default) deployments.
     proto_cpu: Any = proto_tensor.detach().to("cpu")
-
-    payload: dict[str, Any] = {
+    payload = {
         "class_ids": list(class_ids),
         "display_names": display_names,
         "prototypes": proto_cpu,
@@ -231,11 +340,11 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, output_path)
     print(
         f"build-prototypes: wrote {len(class_ids)} prototypes "
-        f"(embed_dim={int(proto_cpu.shape[1])}) to {args.output}"
+        f"(embed_dim={int(proto_cpu.shape[1])}) to {output_path}"
     )
     return 0
 

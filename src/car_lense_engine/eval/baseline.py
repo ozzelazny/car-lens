@@ -48,6 +48,20 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 
+# The five Phase 3.3 exterior views that participate in view-conditional
+# retrieval. The ``non-exterior`` class is handled separately (request
+# rejection at inference time), and the view-classifier head ordering
+# adds it at index 5 -- see
+# :data:`car_lense_engine.training.view_classifier.VIEW_CLASS_NAMES`.
+EXTERIOR_VIEWS: tuple[str, ...] = (
+    "front",
+    "rear",
+    "side",
+    "three-quarter-front",
+    "three-quarter-rear",
+)
+
+
 # --------------------------------------------------------------- public models
 
 
@@ -129,7 +143,7 @@ def build_prototypes(
     *,
     conn: sqlite3.Connection,
     config: BaselineConfig,
-    source: str,
+    source: str | list[str],
     split: str,
 ) -> tuple[list[str], Any]:
     """Build one mean-embedding prototype per class.
@@ -141,6 +155,10 @@ def build_prototypes(
     prototype to compare against and are therefore not predictable by this
     baseline.
 
+    ``source`` may be either a single source name (legacy single-dataset
+    API) or a list of source names (Phase 5.5+ multi-source training);
+    see :func:`_select_rows` for the SQL contract.
+
     Returns
     -------
     (class_ids, proto_tensor)
@@ -151,12 +169,58 @@ def build_prototypes(
     return runner.build_prototypes(conn=conn, source=source, split=split)
 
 
+def build_prototypes_by_view(
+    *,
+    conn: sqlite3.Connection,
+    config: BaselineConfig,
+    source: str | list[str],
+    split: str,
+) -> tuple[list[str], dict[str, Any]]:
+    """Compute mean-pooled L2-normalized prototypes per ``(class, view)``.
+
+    This is the Phase 6.1 view-conditional analogue of
+    :func:`build_prototypes`. Instead of one prototype per class
+    (collapsing all views), we produce one prototype per
+    ``(class, view)`` cell for each of the five exterior views
+    (:data:`EXTERIOR_VIEWS`). Non-exterior images are dropped at
+    selection time -- they don't participate in retrieval at all.
+
+    Returns
+    -------
+    (class_ids, prototypes_by_view)
+        ``class_ids`` is the sorted list of class id strings (the global
+        class index space). ``prototypes_by_view`` maps each exterior
+        view name to a ``(n_classes, embed_dim)`` float tensor on the
+        configured device, with row ``i`` holding the L2-normalized mean
+        embedding for the class at ``class_ids[i]`` in that view.
+        Classes missing a view's prototype get an all-zero row in that
+        view's tensor, which is harmless for retrieval (cosine sim with
+        any unit query vector is 0 -> the class will never be in the
+        top-K from that view, exactly as desired).
+
+    Notes
+    -----
+
+    * Both stages share a single backbone pass: every eligible image is
+      embedded once and bucketed by ``(class, view)``. Re-using the
+      :class:`_BaselineRunner` machinery keeps the model load + preprocess
+      pipeline consistent with :func:`build_prototypes`.
+    * Rows whose ``images.view`` is NULL or not in
+      :data:`EXTERIOR_VIEWS` are silently skipped. This includes the
+      ``interior`` / ``detail`` / ``non-car`` labels collapsed into the
+      view classifier's "non-exterior" output -- those have no
+      retrieval prototype because the service rejects them upstream.
+    """
+    runner = _BaselineRunner(config)
+    return runner.build_prototypes_by_view(conn=conn, source=source, split=split)
+
+
 def evaluate(
     *,
     conn: sqlite3.Connection,
     config: BaselineConfig,
     prototypes: tuple[list[str], Any],
-    source: str,
+    source: str | list[str],
     split: str,
     per_class_top: int = 20,
 ) -> BaselineReport:
@@ -212,13 +276,89 @@ def class_id_for(year: int | None, make: str | None, model: str | None) -> str |
     return f"{int(year)}|{make_s}|{model_s}"
 
 
+def _coerce_source_field(value: object) -> list[str]:
+    """Coerce a pydantic ``source`` field input into a ``list[str]``.
+
+    Used as a ``field_validator(..., mode="before")`` on the
+    ``source`` field of :class:`TrainConfig`, :class:`BaselineConfig`,
+    and :class:`EvaluationConfig`. Accepts:
+
+    * ``str`` -- a single source name, e.g. ``"compcars"``. Returned
+      as ``["compcars"]``. A comma-separated string like
+      ``"compcars,vmmrdb"`` is split into ``["compcars", "vmmrdb"]``
+      with whitespace trimmed around each entry.
+    * ``list``/``tuple`` of strings -- returned as a fresh list,
+      element strings stripped of whitespace.
+
+    Empty / whitespace-only entries are dropped so a stray trailing
+    comma in the CLI form doesn't produce an empty source. An empty
+    final list raises :class:`ValueError`.
+    """
+    if isinstance(value, str):
+        items = [s.strip() for s in value.split(",")]
+    elif isinstance(value, list | tuple):
+        items = [str(s).strip() for s in value]
+    else:
+        raise ValueError(f"source must be a string or list of strings, got {type(value).__name__}")
+    filtered = [s for s in items if s]
+    if not filtered:
+        raise ValueError("source must contain at least one non-empty entry")
+    return filtered
+
+
+def _normalize_sources(source: str | list[str]) -> list[str]:
+    """Normalize a single source or list-of-sources into a non-empty ``list[str]``.
+
+    Accepts either a single string (backward-compat with the original
+    Phase 5.1 / 5.2 API) or a list of strings (Phase 5.5+ multi-source).
+    A bare ``str`` is wrapped in a single-element list; a list is copied
+    and validated element-wise. Each source must be a non-empty string;
+    empty / whitespace-only entries raise :class:`ValueError`. An empty
+    list also raises :class:`ValueError` because there's nothing to
+    filter on.
+    """
+    items = [source] if isinstance(source, str) else list(source)
+    if not items:
+        raise ValueError("source must be a non-empty string or list of strings")
+    normalized: list[str] = []
+    for entry in items:
+        if not isinstance(entry, str):
+            raise ValueError(f"source entries must be strings, got {type(entry).__name__}")
+        stripped = entry.strip()
+        if not stripped:
+            raise ValueError("source entries must be non-empty strings")
+        normalized.append(stripped)
+    return normalized
+
+
+def _source_where_clause(sources: list[str]) -> tuple[str, tuple[str, ...]]:
+    """Build the ``listings.source`` ``WHERE`` fragment + parameter tuple.
+
+    For a single-element list we keep the legacy ``listings.source = ?``
+    form (cheaper plan, exact match on the existing index); for
+    multi-source we emit ``listings.source IN (?, ?, ...)`` with one
+    placeholder per source. SQLite handles both forms over the same
+    index on ``(source, ...)``.
+    """
+    if len(sources) == 1:
+        return "listings.source = ?", (sources[0],)
+    placeholders = ", ".join("?" for _ in sources)
+    return f"listings.source IN ({placeholders})", tuple(sources)
+
+
 def _select_rows(
     conn: sqlite3.Connection,
     *,
-    source: str,
+    source: str | list[str],
     split: str,
-) -> list[tuple[str, Path]]:
-    """Return ``(class_id, local_path)`` pairs for one (source, split) slice.
+) -> list[tuple[str, str | None, Path]]:
+    """Return ``(class_id, view, local_path)`` triples for one (source, split) slice.
+
+    ``source`` may be either a single source name (legacy API) or a list
+    of source names. For a single source the SQL emits the original
+    ``listings.source = ?`` filter; for multiple sources it emits an
+    ``IN (?, ?, ...)`` clause so a Phase 5.5+ training run can pull
+    rows from CompCars + VMMRdb + Stanford Cars in a single pass.
 
     Rows with NULL ``(generation_year, canonical_make, canonical_model)``
     are skipped. The query joins listings to images so a single listing
@@ -234,19 +374,32 @@ def _select_rows(
     :func:`class_id_for`, so any calendar year in the same 4-year
     bucket produces the same class id (e.g. 2012, 2013, 2014, 2015 all
     -> ``"2012|<make>|<model>"``).
+
+    As of Phase 3.5 the filter is on ``images.split`` (migration 010),
+    not ``listings.split``: splits are now stratified per-image by
+    ``(class, view)`` because a single listing can contribute a front
+    shot and a rear shot that legitimately fall into different splits.
+    Rows whose ``images.split`` is NULL (e.g. non-exterior images
+    intentionally left out of training) are excluded. The ``view``
+    column is selected and returned alongside the path so future
+    view-conditional callers can branch on it -- the prototype /
+    training paths in this module do *not* yet consume it.
     """
+    sources = _normalize_sources(source)
+    source_clause, source_params = _source_where_clause(sources)
     sql = (
         "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
+        "       images.view AS view, "
         "       images.local_path AS local_path "
         "FROM listings "
         "JOIN images ON images.listing_id = listings.listing_id "
-        "WHERE listings.source = ? AND listings.split = ? "
+        f"WHERE {source_clause} AND images.split = ? "
         "ORDER BY images.image_id"
     )
-    cur = conn.execute(sql, (source, split))
-    rows: list[tuple[str, Path]] = []
+    cur = conn.execute(sql, (*source_params, split))
+    rows: list[tuple[str, str | None, Path]] = []
     for row in cur.fetchall():
         cid = class_id_for(row["year"], row["make"], row["model"])
         if cid is None:
@@ -254,11 +407,15 @@ def _select_rows(
         local_path = row["local_path"]
         if not local_path:
             continue
-        rows.append((cid, Path(str(local_path))))
+        view_raw = row["view"]
+        view: str | None = str(view_raw) if view_raw is not None else None
+        rows.append((cid, view, Path(str(local_path))))
     return rows
 
 
-def _chunked(items: list[tuple[str, Path]], n: int) -> Iterator[list[tuple[str, Path]]]:
+def _chunked(
+    items: list[tuple[str, str | None, Path]], n: int
+) -> Iterator[list[tuple[str, str | None, Path]]]:
     """Slice ``items`` into chunks of at most ``n`` elements (preserving order)."""
     if n <= 0:
         raise ValueError(f"batch size must be > 0, got {n}")
@@ -287,7 +444,7 @@ class _BaselineRunner:
         self,
         *,
         conn: sqlite3.Connection,
-        source: str,
+        source: str | list[str],
         split: str,
     ) -> tuple[list[str], Any]:
         rows = _select_rows(conn, source=source, split=split)
@@ -338,12 +495,114 @@ class _BaselineRunner:
         proto_tensor = torch_mod.stack(mean_rows, dim=0) if mean_rows else torch_mod.zeros((0, 0))
         return class_ids, proto_tensor
 
+    def build_prototypes_by_view(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        source: str | list[str],
+        split: str,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """Per-(class, view) variant of :meth:`build_prototypes`.
+
+        See :func:`build_prototypes_by_view` for the contract; this is the
+        instance-method implementation that handles the actual embedding
+        and bucketing.
+        """
+        all_rows = _select_rows(conn, source=source, split=split)
+        # Drop rows whose view is NULL or non-exterior. We do this AFTER
+        # the SQL fetch (rather than encoding the view set in the WHERE
+        # clause) so the row-shape stays consistent with the single-
+        # prototype path and existing tests don't have to be reshaped
+        # for the view filter.
+        exterior = set(EXTERIOR_VIEWS)
+        rows: list[tuple[str, str | None, Path]] = [
+            (cid, view, path) for (cid, view, path) in all_rows if view in exterior
+        ]
+        n_dropped = len(all_rows) - len(rows)
+        if n_dropped:
+            logger.info(
+                "baseline (per-view): dropped %d/%d rows with NULL or non-exterior view",
+                n_dropped,
+                len(all_rows),
+            )
+        if not rows:
+            logger.warning(
+                "baseline (per-view): no exterior train rows for source=%s split=%s -- "
+                "prototypes will be empty",
+                source,
+                split,
+            )
+            import torch  # noqa: PLC0415
+
+            empty: dict[str, Any] = {v: torch.zeros((0, 0)) for v in EXTERIOR_VIEWS}
+            return [], empty
+
+        logger.info(
+            "baseline (per-view): building prototypes from %d exterior train images "
+            "(source=%s split=%s)",
+            len(rows),
+            source,
+            split,
+        )
+        embeddings, used_class_ids, used_views = self._embed_rows_with_views(rows)
+        torch_mod = self._require_torch()
+
+        # First pass: collect all class ids so the per-view tensors share
+        # the same row index space. Sorted for deterministic ordering.
+        class_ids = sorted(set(used_class_ids))
+        class_to_idx = {cid: i for i, cid in enumerate(class_ids)}
+
+        # Group sums by (view, class_idx).
+        per_view_sums: dict[str, dict[int, Any]] = {v: {} for v in EXTERIOR_VIEWS}
+        per_view_counts: dict[str, Counter[int]] = {v: Counter() for v in EXTERIOR_VIEWS}
+        for emb, cid, view in zip(embeddings, used_class_ids, used_views, strict=True):
+            if view not in per_view_sums:
+                # Should never happen given the up-front filter, but
+                # cheap to be defensive.
+                continue
+            idx = class_to_idx[cid]
+            per_view_counts[view][idx] += 1
+            if idx in per_view_sums[view]:
+                per_view_sums[view][idx] = per_view_sums[view][idx] + emb
+            else:
+                per_view_sums[view][idx] = emb.clone()
+
+        # Embed dim is the trailing axis of any successfully-embedded row.
+        embed_dim = int(embeddings.shape[1])
+        # Match the device of the accumulated embeddings so the zero-fill
+        # rows for missing (class, view) cells don't mix CPU + CUDA when
+        # we later torch.stack them. Consumers (prototype cache writer,
+        # recognize_api loader) expect CPU tensors, so we move the final
+        # per-view tensors to CPU before returning.
+        device = embeddings.device
+
+        prototypes_by_view: dict[str, Any] = {}
+        for view in EXTERIOR_VIEWS:
+            rows_out: list[Any] = []
+            sums = per_view_sums[view]
+            counts = per_view_counts[view]
+            for idx in range(len(class_ids)):
+                if idx not in sums:
+                    rows_out.append(torch_mod.zeros((embed_dim,), device=device))
+                    continue
+                mean = sums[idx] / float(counts[idx])
+                norm = mean.norm()
+                if norm.item() == 0.0:
+                    rows_out.append(torch_mod.zeros((embed_dim,), device=device))
+                else:
+                    rows_out.append(mean / norm)
+            if rows_out:
+                prototypes_by_view[view] = torch_mod.stack(rows_out, dim=0).cpu()
+            else:
+                prototypes_by_view[view] = torch_mod.zeros((0, embed_dim), device=device).cpu()
+        return class_ids, prototypes_by_view
+
     def evaluate(
         self,
         *,
         conn: sqlite3.Connection,
         prototypes: tuple[list[str], Any],
-        source: str,
+        source: str | list[str],
         split: str,
         per_class_top: int,
     ) -> BaselineReport:
@@ -545,14 +804,17 @@ class _BaselineRunner:
 
     def _embed_rows(
         self,
-        rows: list[tuple[str, Path]],
+        rows: list[tuple[str, str | None, Path]],
     ) -> tuple[Any, list[str]]:
         """Embed every path in ``rows`` (L2-normalized).
 
         Returns ``(tensor, class_ids)`` where ``tensor`` is the stacked
         normalized embeddings for the rows that successfully loaded, and
         ``class_ids`` is the parallel list of class ids (one per surviving
-        row). Bad / missing files are logged at WARNING and dropped.
+        row). The per-row ``view`` value is part of the input tuple but
+        is not yet consumed -- it's plumbed through for the upcoming
+        view-conditional prototype work (Phase 3.5 Step 6). Bad /
+        missing files are logged at WARNING and dropped.
         """
         self._ensure_model()
         torch_mod = self._require_torch()
@@ -565,7 +827,7 @@ class _BaselineRunner:
         for chunk in _chunked(rows, config.batch_size):
             ok_class_ids: list[str] = []
             tensors: list[Any] = []
-            for cid, path in chunk:
+            for cid, _view, path in chunk:
                 try:
                     tensors.append(self._load_and_preprocess(path))
                 except Exception as exc:  # noqa: BLE001 -- log + skip
@@ -587,6 +849,58 @@ class _BaselineRunner:
         if not all_chunks:
             return torch_mod.zeros((0, 0)), []
         return torch_mod.cat(all_chunks, dim=0), used_class_ids
+
+    def _embed_rows_with_views(
+        self,
+        rows: list[tuple[str, str | None, Path]],
+    ) -> tuple[Any, list[str], list[str]]:
+        """Per-view variant of :meth:`_embed_rows`.
+
+        Identical to :meth:`_embed_rows` but also returns the parallel
+        list of view strings for the surviving (successfully-loaded)
+        rows. Used by :meth:`build_prototypes_by_view` to bucket
+        embeddings by ``(class, view)``. Rows are assumed to have
+        non-NULL view (the caller filters before calling).
+        """
+        self._ensure_model()
+        torch_mod = self._require_torch()
+        config = self._config
+        all_chunks: list[Any] = []
+        used_class_ids: list[str] = []
+        used_views: list[str] = []
+        n_skipped = 0
+        n_total = len(rows)
+        n_done = 0
+        for chunk in _chunked(rows, config.batch_size):
+            ok_class_ids: list[str] = []
+            ok_views: list[str] = []
+            tensors: list[Any] = []
+            for cid, view, path in chunk:
+                if view is None:  # pragma: no cover -- caller filters NULLs
+                    continue
+                try:
+                    tensors.append(self._load_and_preprocess(path))
+                except Exception as exc:  # noqa: BLE001 -- log + skip
+                    logger.warning("baseline: skipping %s (%s)", path, exc)
+                    n_skipped += 1
+                    continue
+                ok_class_ids.append(cid)
+                ok_views.append(view)
+            if not tensors:
+                continue
+            batch = torch_mod.stack(tensors).to(config.device)
+            with torch_mod.no_grad():
+                features = self._encode_image(batch)
+                features = features / features.norm(dim=-1, keepdim=True)
+            all_chunks.append(features)
+            used_class_ids.extend(ok_class_ids)
+            used_views.extend(ok_views)
+            n_done += len(ok_class_ids)
+            if n_done and (n_done % max(50, config.batch_size * 4) < config.batch_size):
+                logger.info("baseline (per-view): embedded %d / %d", n_done, n_total)
+        if not all_chunks:
+            return torch_mod.zeros((0, 0)), [], []
+        return torch_mod.cat(all_chunks, dim=0), used_class_ids, used_views
 
     def _encode_image(self, batch: Any) -> Any:
         model = self._model
@@ -653,14 +967,27 @@ def _load_image_encoder_checkpoint(
     )
 
 
-def _count_train_images(conn: sqlite3.Connection, *, source: str, split: str) -> int:
-    """Count train images for ``(source, split)``. Used in the report header."""
+def _count_train_images(
+    conn: sqlite3.Connection,
+    *,
+    source: str | list[str],
+    split: str,
+) -> int:
+    """Count train images for ``(source, split)``. Used in the report header.
+
+    ``source`` may be a single source name or a list -- see
+    :func:`_select_rows` for the multi-source contract. Filters on
+    ``images.split`` (migration 010) rather than ``listings.split`` --
+    splits are now per-image (Phase 3.5).
+    """
+    sources = _normalize_sources(source)
+    source_clause, source_params = _source_where_clause(sources)
     sql = (
         "SELECT COUNT(*) AS n "
         "FROM listings JOIN images ON images.listing_id = listings.listing_id "
-        "WHERE listings.source = ? AND listings.split = ?"
+        f"WHERE {source_clause} AND images.split = ?"
     )
-    cur = conn.execute(sql, (source, split))
+    cur = conn.execute(sql, (*source_params, split))
     row = cur.fetchone()
     return int(row["n"]) if row is not None else 0
 
@@ -668,25 +995,34 @@ def _count_train_images(conn: sqlite3.Connection, *, source: str, split: str) ->
 def _per_class_train_counts(
     conn: sqlite3.Connection,
     *,
-    source: str,
+    source: str | list[str],
 ) -> dict[str, int]:
-    """Map ``class_id -> n_train_images`` for the given source's train split.
+    """Map ``class_id -> n_train_images`` for the given source(s) train split.
+
+    ``source`` may be a single source name or a list of source names; when
+    a list is passed, the counts are summed across all selected sources
+    (the same class id can be contributed by more than one source after
+    Phase 4.5 canonicalization).
 
     Reads canonical_make / canonical_model (Phase 4.5) AND
     generation_year (Phase 4.6); rows whose canonical / generation
-    fields are NULL are excluded from the per-class counts.
+    fields are NULL are excluded from the per-class counts. Filters
+    on ``images.split = 'train'`` (migration 010), not
+    ``listings.split`` (Phase 3.5).
     """
+    sources = _normalize_sources(source)
+    source_clause, source_params = _source_where_clause(sources)
     sql = (
         "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
         "       COUNT(images.image_id) AS n "
         "FROM listings JOIN images ON images.listing_id = listings.listing_id "
-        "WHERE listings.source = ? AND listings.split = 'train' "
+        f"WHERE {source_clause} AND images.split = 'train' "
         "GROUP BY listings.generation_year, listings.canonical_make, listings.canonical_model"
     )
     out: dict[str, int] = defaultdict(int)
-    cur = conn.execute(sql, (source,))
+    cur = conn.execute(sql, source_params)
     for row in cur.fetchall():
         cid = class_id_for(row["year"], row["make"], row["model"])
         if cid is None:
@@ -713,11 +1049,13 @@ def summary_line(report: BaselineReport) -> str:
 
 
 __all__ = [
+    "EXTERIOR_VIEWS",
     "BaselineConfig",
     "BaselineReport",
     "ClassMetric",
     "ConfusionPair",
     "build_prototypes",
+    "build_prototypes_by_view",
     "class_id_for",
     "evaluate",
     "summary_line",

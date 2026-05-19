@@ -57,9 +57,15 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from car_lense_engine.eval.baseline import class_id_for
+from car_lense_engine.eval.baseline import (
+    _coerce_source_field,
+    _load_image_encoder_checkpoint,
+    _normalize_sources,
+    _source_where_clause,
+    class_id_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +84,21 @@ class TrainConfig(BaseModel):
     pretrained: str = "datacompdr"
     """OpenCLIP pretrained tag."""
 
-    source: str = "stanford_cars"
-    """``listings.source`` value to train against."""
+    source: list[str] = Field(default_factory=lambda: ["stanford_cars"])
+    """``listings.source`` values to train against.
+
+    A list to support multi-source training (Phase 5.5+): e.g.
+    ``["compcars", "vmmrdb", "stanford_cars"]``. For backward
+    compatibility the validator also accepts a bare string (legacy
+    single-source config) and a comma-separated string (e.g.
+    ``"compcars,vmmrdb"``).
+    """
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _coerce_source(cls, value: object) -> list[str]:
+        """Accept str / comma-separated str / list[str] for ``source``."""
+        return _coerce_source_field(value)
 
     train_split: str = "train"
     val_split: str = "test"
@@ -106,6 +125,31 @@ class TrainConfig(BaseModel):
     hard_neg_confusion_path: Path | None = None
     """Path to the Phase 5.1 baseline JSON report. If ``None`` or the
     file is missing, the class-weight vector is all-ones."""
+
+    resume_checkpoint: Path | None = None
+    """Optional path to a Phase 5.2 checkpoint whose
+    ``image_encoder_state_dict`` is overlaid on the pretrained OpenCLIP
+    backbone before training starts.
+
+    The classification head is *not* restored -- it is reinitialised
+    fresh on every run because the class-id space may differ between
+    the old checkpoint and the current training set (e.g. resuming a
+    2,566-class CompCars run on a 6,423-class union-of-sources). The
+    head reconverges quickly (~1 epoch) on top of the fine-tuned
+    backbone.
+    """
+
+    @field_validator("resume_checkpoint", mode="before")
+    @classmethod
+    def _coerce_resume_checkpoint(cls, value: object) -> Path | None:
+        """Accept ``None`` / ``str`` / :class:`Path` for ``resume_checkpoint``."""
+        if value is None:
+            return None
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str):
+            return Path(value) if value else None
+        raise TypeError(f"resume_checkpoint must be None, str, or Path, got {type(value).__name__}")
 
     aug_random_resized_crop: bool = True
     aug_color_jitter: bool = True
@@ -212,14 +256,20 @@ def build_class_weights_from_confusion(
 def _select_train_rows(
     conn: sqlite3.Connection,
     *,
-    source: str,
+    source: str | list[str],
     split: str,
-) -> list[tuple[str, Path]]:
-    """Return ``(class_id, local_path)`` pairs for ``(source, split)``.
+) -> list[tuple[str, str | None, Path]]:
+    """Return ``(class_id, view, local_path)`` triples for ``(source, split)``.
 
     Mirrors the helper in :mod:`car_lense_engine.eval.baseline` but is
     duplicated here so the two modules don't grow a tight coupling on
-    each other's private SQL helpers. Reads the canonical_make /
+    each other's private SQL helpers. ``source`` may be either a single
+    source name (legacy single-dataset API) or a list of source names
+    (Phase 5.5+ multi-source training); the SQL emits ``listings.source = ?``
+    for the single-source case and ``listings.source IN (?, ?, ...)``
+    when multiple sources are passed.
+
+    Reads the canonical_make /
     canonical_model columns (migration 8, Phase 4.5) AND
     generation_year (migration 9, Phase 4.6); rows whose canonical or
     generation fields are NULL are skipped. The user MUST run the
@@ -228,19 +278,29 @@ def _select_train_rows(
     As of Phase 4.6 the class id is keyed on the 4-year generation
     bucket (bucket start year), not the raw calendar year -- adjacent
     model years of the same vehicle now train as a single class.
+
+    As of Phase 3.5 the filter is on ``images.split`` (migration 010),
+    not ``listings.split``: splits are now stratified per-image by
+    ``(class, view)``. The ``view`` column is selected and returned
+    alongside the path so future view-conditional training callers can
+    branch on it -- the training loop in this module does *not* yet
+    consume it.
     """
+    sources = _normalize_sources(source)
+    source_clause, source_params = _source_where_clause(sources)
     sql = (
         "SELECT listings.generation_year AS year, "
         "       listings.canonical_make AS make, "
         "       listings.canonical_model AS model, "
+        "       images.view AS view, "
         "       images.local_path AS local_path "
         "FROM listings "
         "JOIN images ON images.listing_id = listings.listing_id "
-        "WHERE listings.source = ? AND listings.split = ? "
+        f"WHERE {source_clause} AND images.split = ? "
         "ORDER BY images.image_id"
     )
-    cur = conn.execute(sql, (source, split))
-    rows: list[tuple[str, Path]] = []
+    cur = conn.execute(sql, (*source_params, split))
+    rows: list[tuple[str, str | None, Path]] = []
     for row in cur.fetchall():
         cid = class_id_for(row["year"], row["make"], row["model"])
         if cid is None:
@@ -248,7 +308,9 @@ def _select_train_rows(
         local_path = row["local_path"]
         if not local_path:
             continue
-        rows.append((cid, Path(str(local_path))))
+        view_raw = row["view"]
+        view: str | None = str(view_raw) if view_raw is not None else None
+        rows.append((cid, view, Path(str(local_path))))
     return rows
 
 
@@ -313,11 +375,13 @@ class _TrainingRunner:
         # Class id space is the union of train + val so the head's output
         # dim covers any val-only class. (We still warn about val-only
         # classes -- they can never be learned without train samples.)
-        class_ids = sorted({cid for cid, _ in train_rows} | {cid for cid, _ in val_rows})
+        class_ids = sorted(
+            {cid for cid, _view, _path in train_rows} | {cid for cid, _view, _path in val_rows}
+        )
         n_classes = len(class_ids)
         class_to_idx = {cid: i for i, cid in enumerate(class_ids)}
 
-        train_only_classes = {cid for cid, _ in train_rows}
+        train_only_classes = {cid for cid, _view, _path in train_rows}
         val_only = [cid for cid in class_ids if cid not in train_only_classes]
         if val_only:
             logger.warning(
@@ -352,6 +416,43 @@ class _TrainingRunner:
         self._ensure_model()
         torch_mod = self._require_torch()
         nn = torch_mod.nn
+
+        # Optionally overlay a previously-saved fine-tuned image-encoder
+        # state dict on top of the pretrained OpenCLIP weights. This is
+        # the "resume training from a Phase 5.2 checkpoint" path: only
+        # the backbone is restored. The linear classification head is
+        # always built fresh below because the class-id space may have
+        # changed between runs (e.g. resuming a CompCars-only run on a
+        # union-of-sources class space). The head is small and
+        # reconverges in ~1 epoch on top of the fine-tuned backbone.
+        if config.resume_checkpoint is not None:
+            model_for_resume = self._require_model()
+            _load_image_encoder_checkpoint(
+                model=model_for_resume,
+                checkpoint_path=config.resume_checkpoint,
+                device=config.device,
+                torch_mod=torch_mod,
+            )
+            # Peek at the payload again to surface the source-checkpoint
+            # val_top1 in the training log. The shared helper already
+            # validated the file is a Phase 5.2 checkpoint, so a second
+            # ``torch.load`` here is just a cheap dict lookup -- we drop
+            # the state dicts immediately.
+            try:
+                resume_payload = torch_mod.load(
+                    config.resume_checkpoint,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+                resume_val_top1 = resume_payload.get("val_top1")
+            except Exception:  # noqa: BLE001 -- best-effort; load already succeeded once
+                resume_val_top1 = None
+            logger.info(
+                "train: resumed image-encoder weights from %s "
+                "(best_val_top1=%s; head will be reinitialised)",
+                config.resume_checkpoint,
+                resume_val_top1,
+            )
 
         # Build the head. embed_dim is read off the loaded backbone.
         embed_dim = self._infer_embed_dim()
@@ -690,8 +791,15 @@ class _TrainingRunner:
         torch_mod = self._require_torch()
         self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
         slug = self._config.model_name.lower().replace("-", "_").replace("/", "_")
-        source_slug = self._config.source.lower().replace("/", "_")
-        fname = f"{slug}_{source_slug}_epoch{epoch:02d}_top1_{val_top1 * 100:.1f}.pt"
+        # Multi-source runs are joined with ``-`` so the filename stays
+        # filesystem-safe (no slashes / commas / spaces). Single-source
+        # runs reproduce the legacy ``<model>_<source>_epoch...`` form.
+        source_slug = "-".join(s.lower().replace("/", "_") for s in self._config.source)
+        # When resuming, tag the filename with ``_resumed`` so the
+        # continuation checkpoints don't clobber the source checkpoint
+        # in the same ``--checkpoint-dir``.
+        resumed_tag = "_resumed" if self._config.resume_checkpoint is not None else ""
+        fname = f"{slug}_{source_slug}{resumed_tag}_epoch{epoch:02d}_top1_{val_top1 * 100:.1f}.pt"
         path = self._checkpoint_dir / fname
         # Save only the visual tower's state_dict (drops the text tower
         # we never update); falls back to the full model state if no
@@ -784,7 +892,7 @@ class _TrainingRunner:
 
 
 class _ImagePathDataset:
-    """A torch-style ``Dataset`` over ``(class_id, local_path)`` rows.
+    """A torch-style ``Dataset`` over ``(class_id, view, local_path)`` rows.
 
     Lazy-imports ``PIL`` so the module remains import-cheap. Rows that
     fail to load (missing file, decode error, etc.) are skipped at
@@ -792,12 +900,16 @@ class _ImagePathDataset:
     (via the collate function) drops the bad sample. This means batch
     sizes may shrink late in an epoch, but training is robust to dirty
     data.
+
+    The per-row ``view`` value is stored alongside the path but not
+    yet consumed by the training loop; it's threaded through for
+    future view-conditional training (Phase 3.5 Step 6).
     """
 
     def __init__(
         self,
         *,
-        rows: list[tuple[str, Path]],
+        rows: list[tuple[str, str | None, Path]],
         class_to_idx: dict[str, int],
         preprocess: Any,
     ) -> None:
@@ -809,7 +921,7 @@ class _ImagePathDataset:
         return len(self._rows)
 
     def __getitem__(self, idx: int) -> tuple[Any, int] | None:
-        cid, path = self._rows[idx]
+        cid, _view, path = self._rows[idx]
         label = self._class_to_idx[cid]
         from PIL import Image as PILImageModule  # noqa: PLC0415
         from PIL import UnidentifiedImageError  # noqa: PLC0415

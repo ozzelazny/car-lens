@@ -211,6 +211,16 @@ def _seed_dataset(
                         position=1,
                     ),
                 )
+                # Phase 3.5: training filters on ``images.split``
+                # (migration 010), not ``listings.split``. Mirror the
+                # listing-level split into the per-image column so the
+                # fixture reflects what the make-splits CLI would have
+                # produced.
+                with conn:
+                    conn.execute(
+                        "UPDATE images SET split = ? WHERE image_id = ?",
+                        (split_name, image_id),
+                    )
                 dest[cid].append(img_path)
     return train_paths, test_paths
 
@@ -507,6 +517,206 @@ def test_cli_rejects_missing_db(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
+def test_train_config_source_accepts_str_and_comma_separated() -> None:
+    """``TrainConfig.source`` validator accepts legacy str / comma-string / list."""
+    from car_lense_engine.training import TrainConfig
+
+    cfg_str = TrainConfig(source="compcars")  # type: ignore[arg-type]
+    assert cfg_str.source == ["compcars"]
+
+    cfg_csv = TrainConfig(source="compcars,vmmrdb,stanford_cars")  # type: ignore[arg-type]
+    assert cfg_csv.source == ["compcars", "vmmrdb", "stanford_cars"]
+
+    cfg_list = TrainConfig(source=["compcars", "vmmrdb"])
+    assert cfg_list.source == ["compcars", "vmmrdb"]
+
+
+def test_train_config_rejects_empty_source() -> None:
+    """An empty list / empty string is rejected by the validator."""
+    from pydantic import ValidationError
+
+    from car_lense_engine.training import TrainConfig
+
+    with pytest.raises(ValidationError):
+        TrainConfig(source=[])
+    with pytest.raises(ValidationError):
+        TrainConfig(source="")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        TrainConfig(source="  , ,")  # type: ignore[arg-type]
+
+
+def test_train_classifier_cli_parses_comma_separated_sources(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--source compcars,vmmrdb`` lands in TrainConfig as ``["compcars", "vmmrdb"]``.
+
+    We intercept :func:`run_training` so the CLI runs end-to-end through
+    arg parsing + config construction without spinning up the heavy
+    training loop. The captured ``TrainConfig`` is asserted on directly.
+    """
+    from car_lense_engine.training import cli as train_cli
+    from car_lense_engine.training import train_classifier as train_mod
+
+    open_db(db_path).close()  # apply migrations
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_training(
+        *,
+        conn: Any,
+        config: Any,
+        checkpoint_dir: Path,
+    ) -> Any:
+        from car_lense_engine.training import TrainReport
+
+        captured["config"] = config
+        return TrainReport(
+            config=config,
+            n_classes=0,
+            n_train=0,
+            n_val=0,
+            per_epoch=[],
+            best_epoch=0,
+            best_val_top1=0.0,
+            best_val_top5=0.0,
+            checkpoint_path="",
+            total_elapsed_s=0.0,
+        )
+
+    monkeypatch.setattr(train_mod, "run_training", fake_run_training)
+    # The CLI imported the symbol at module-load time, so patch its
+    # local reference too.
+    monkeypatch.setattr(train_cli, "run_training", fake_run_training)
+
+    output = tmp_path / "reports" / "p5_train.json"
+    ckpt_dir = tmp_path / "ckpts"
+    rc = train_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--source",
+            "compcars,vmmrdb,stanford_cars",
+            "--model",
+            "StubMobileCLIP",
+            "--pretrained",
+            "stub",
+            "--device",
+            "cpu",
+            "--batch-size",
+            "2",
+            "--num-workers",
+            "0",
+            "--epochs",
+            "0",
+            "--warmup-epochs",
+            "0",
+            "--hard-neg-confusion-path",
+            str(tmp_path / "missing.json"),
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--output",
+            str(output),
+        ]
+    )
+    assert rc == 0
+    config = captured["config"]
+    assert config.source == ["compcars", "vmmrdb", "stanford_cars"]
+
+
+def test_train_classifier_cli_single_source_remains_list(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy ``--source compcars`` form lands as ``["compcars"]``."""
+    from car_lense_engine.training import cli as train_cli
+    from car_lense_engine.training import train_classifier as train_mod
+
+    open_db(db_path).close()
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_training(
+        *,
+        conn: Any,
+        config: Any,
+        checkpoint_dir: Path,
+    ) -> Any:
+        from car_lense_engine.training import TrainReport
+
+        captured["config"] = config
+        return TrainReport(
+            config=config,
+            n_classes=0,
+            n_train=0,
+            n_val=0,
+            per_epoch=[],
+            best_epoch=0,
+            best_val_top1=0.0,
+            best_val_top5=0.0,
+            checkpoint_path="",
+            total_elapsed_s=0.0,
+        )
+
+    monkeypatch.setattr(train_mod, "run_training", fake_run_training)
+    monkeypatch.setattr(train_cli, "run_training", fake_run_training)
+
+    output = tmp_path / "reports" / "p5_train.json"
+    ckpt_dir = tmp_path / "ckpts"
+    rc = train_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--source",
+            "compcars",
+            "--epochs",
+            "0",
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--output",
+            str(output),
+            "--device",
+            "cpu",
+            "--num-workers",
+            "0",
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].source == ["compcars"]
+
+
+def test_train_classifier_cli_rejects_empty_source(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+) -> None:
+    """An all-whitespace ``--source`` is rejected with exit code 2."""
+    from car_lense_engine.training import cli as train_cli
+
+    open_db(db_path).close()
+
+    with pytest.raises(SystemExit) as excinfo:
+        train_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--source",
+                "  , ,",
+                "--epochs",
+                "0",
+                "--device",
+                "cpu",
+                "--num-workers",
+                "0",
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
 def test_cli_runs_and_writes_report(
     stub_open_clip: _StubOpenClip,
     tmp_path: Path,
@@ -582,7 +792,7 @@ def _build_dataset_with_paths(
     """Construct an ``_ImagePathDataset`` over the given paths (single class)."""
     from car_lense_engine.training.train_classifier import _ImagePathDataset
 
-    rows = [(class_id, p) for p in paths]
+    rows = [(class_id, None, p) for p in paths]
     return _ImagePathDataset(
         rows=rows,
         class_to_idx={class_id: 0},
@@ -621,6 +831,243 @@ def test_dataset_skips_missing_image_file(
     # The warning must reference the bad path.
     warning_messages = [rec.getMessage() for rec in caplog.records if rec.levelname == "WARNING"]
     assert any(str(missing) in msg for msg in warning_messages), warning_messages
+
+
+def test_train_config_accepts_resume_checkpoint(tmp_path: Path) -> None:
+    """``TrainConfig.resume_checkpoint`` validator accepts None / str / Path."""
+    from car_lense_engine.training import TrainConfig
+
+    cfg_none = TrainConfig(resume_checkpoint=None)
+    assert cfg_none.resume_checkpoint is None
+
+    # Default omits the field entirely -> None.
+    cfg_default = TrainConfig()
+    assert cfg_default.resume_checkpoint is None
+
+    p = tmp_path / "ckpt.pt"
+    p.write_bytes(b"")  # existence not required by the validator, just type-coerce
+    cfg_str = TrainConfig(resume_checkpoint=str(p))  # type: ignore[arg-type]
+    assert cfg_str.resume_checkpoint == p
+
+    cfg_path = TrainConfig(resume_checkpoint=p)
+    assert cfg_path.resume_checkpoint == p
+
+    # Empty string is normalised to None (parity with how argparse would
+    # surface an unspecified flag).
+    cfg_empty = TrainConfig(resume_checkpoint="")  # type: ignore[arg-type]
+    assert cfg_empty.resume_checkpoint is None
+
+
+def test_train_classifier_cli_parses_resume_checkpoint(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--resume-checkpoint PATH`` is forwarded into ``TrainConfig``."""
+    from car_lense_engine.training import cli as train_cli
+    from car_lense_engine.training import train_classifier as train_mod
+
+    open_db(db_path).close()
+
+    # The CLI validates the path exists; create a placeholder file.
+    resume_path = tmp_path / "resume.pt"
+    resume_path.write_bytes(b"")
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_training(
+        *,
+        conn: Any,
+        config: Any,
+        checkpoint_dir: Path,
+    ) -> Any:
+        from car_lense_engine.training import TrainReport
+
+        captured["config"] = config
+        return TrainReport(
+            config=config,
+            n_classes=0,
+            n_train=0,
+            n_val=0,
+            per_epoch=[],
+            best_epoch=0,
+            best_val_top1=0.0,
+            best_val_top5=0.0,
+            checkpoint_path="",
+            total_elapsed_s=0.0,
+        )
+
+    monkeypatch.setattr(train_mod, "run_training", fake_run_training)
+    monkeypatch.setattr(train_cli, "run_training", fake_run_training)
+
+    output = tmp_path / "reports" / "p5_train.json"
+    ckpt_dir = tmp_path / "ckpts"
+    rc = train_cli.main(
+        [
+            "--db",
+            str(db_path),
+            "--source",
+            "stanford_cars",
+            "--epochs",
+            "0",
+            "--device",
+            "cpu",
+            "--num-workers",
+            "0",
+            "--resume-checkpoint",
+            str(resume_path),
+            "--checkpoint-dir",
+            str(ckpt_dir),
+            "--output",
+            str(output),
+        ]
+    )
+    assert rc == 0
+    assert captured["config"].resume_checkpoint == resume_path
+
+
+def test_train_classifier_cli_rejects_missing_resume_checkpoint_path(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+) -> None:
+    """A non-existent ``--resume-checkpoint`` path exits with code 2."""
+    from car_lense_engine.training import cli as train_cli
+
+    open_db(db_path).close()
+    missing = tmp_path / "does_not_exist.pt"
+
+    with pytest.raises(SystemExit) as excinfo:
+        train_cli.main(
+            [
+                "--db",
+                str(db_path),
+                "--source",
+                "stanford_cars",
+                "--epochs",
+                "0",
+                "--device",
+                "cpu",
+                "--num-workers",
+                "0",
+                "--resume-checkpoint",
+                str(missing),
+            ]
+        )
+    assert excinfo.value.code == 2
+
+
+def test_train_classifier_resumes_from_checkpoint_payload(
+    stub_open_clip: _StubOpenClip,
+    tmp_path: Path,
+    db_path: Path,
+) -> None:
+    """A real torch checkpoint dict with ``image_encoder_state_dict`` is loaded.
+
+    Builds a tiny fake checkpoint that contains the state dict of a
+    freshly-instantiated ``_StubVisual`` (the same shape the stub
+    ``open_clip`` will produce). Runs ``run_training`` with
+    ``resume_checkpoint`` pointing at the fake checkpoint and asserts
+    that the trainer applies the saved weights to ``model.visual`` --
+    we verify by snapshotting ``model.visual.proj.weight`` mid-training
+    and comparing to the checkpointed tensor after the call.
+    """
+    from car_lense_engine.training import TrainConfig, run_training
+    from car_lense_engine.training.train_classifier import _TrainingRunner
+
+    classes = [
+        (2012, "Acura", "RL"),
+        (2007, "Hyundai", "Sonata"),
+    ]
+    conn = open_db(db_path)
+    try:
+        _seed_dataset(
+            conn,
+            tmp_path=tmp_path,
+            classes=classes,
+            n_train_per_class=2,
+            n_test_per_class=1,
+        )
+    finally:
+        conn.close()
+
+    # Build a fake checkpoint payload off a *fresh* stub visual whose
+    # weights we control. The trainer stub will instantiate its own
+    # ``_StubVisual`` (different random init), then ``run_training``
+    # should overlay these weights on top before the optimiser runs.
+    seed_visual = _StubVisual(embed_dim=16)
+    # Deliberately set a recognisable weight so we can detect the load.
+    with torch.no_grad():
+        seed_visual.proj.weight.fill_(0.4242)
+        seed_visual.proj.bias.fill_(-0.1313)
+    resume_path = tmp_path / "resume.pt"
+    torch.save(
+        {
+            "image_encoder_state_dict": seed_visual.state_dict(),
+            "head_state_dict": {},
+            "config": {},
+            "n_classes": 2,
+            "class_ids": ["a", "b"],
+            "epoch": 4,
+            "val_top1": 0.8387,
+        },
+        resume_path,
+    )
+
+    # Capture the visual weights immediately after the resume overlay
+    # by monkey-patching ``_infer_embed_dim`` to also snapshot the
+    # weights. We restore it on teardown.
+    snapshots: dict[str, torch.Tensor] = {}
+    orig_infer = _TrainingRunner._infer_embed_dim
+
+    def _infer_and_snapshot(self: _TrainingRunner) -> int:
+        model = self._require_model()
+        # Snapshot just after resume but before any optimiser step.
+        snapshots["weight"] = model.visual.proj.weight.detach().clone()
+        snapshots["bias"] = model.visual.proj.bias.detach().clone()
+        return orig_infer(self)
+
+    _TrainingRunner._infer_embed_dim = _infer_and_snapshot  # type: ignore[method-assign]
+    try:
+        config = TrainConfig(
+            model_name="StubMobileCLIP",
+            pretrained="stub",
+            source="stanford_cars",
+            train_split="train",
+            val_split="test",
+            device="cpu",
+            batch_size=2,
+            num_workers=0,
+            epochs=1,
+            lr_backbone=1e-2,
+            lr_head=1e-1,
+            weight_decay=0.0,
+            warmup_epochs=0,
+            label_smoothing=0.0,
+            hard_neg_weight=1.0,
+            hard_neg_confusion_path=None,
+            resume_checkpoint=resume_path,
+            seed=123,
+        )
+        ckpt_dir = tmp_path / "ckpts"
+        conn = open_db(db_path)
+        try:
+            report = run_training(conn=conn, config=config, checkpoint_dir=ckpt_dir)
+        finally:
+            conn.close()
+    finally:
+        _TrainingRunner._infer_embed_dim = orig_infer  # type: ignore[method-assign]
+
+    # The snapshot taken AFTER resume but BEFORE optimisation must
+    # match the checkpointed weights -- proving the overlay landed.
+    assert torch.allclose(snapshots["weight"], seed_visual.proj.weight)
+    assert torch.allclose(snapshots["bias"], seed_visual.proj.bias)
+
+    # Resumed checkpoints land in a filename with ``_resumed_`` so they
+    # don't clobber the source ckpt.
+    assert report.checkpoint_path
+    assert "_resumed_" in Path(report.checkpoint_path).name
 
 
 def test_dataset_skips_corrupted_jpeg(

@@ -150,16 +150,24 @@ def _seed_one_class(conn: sqlite3.Connection, tmp_path: Path) -> dict[str, list[
                         generation_year=gen_year,
                     ),
                 )
+                image_id = f"{counter:064d}"
                 images.insert_image(
                     conn,
                     Image(
-                        image_id=f"{counter:064d}",
+                        image_id=image_id,
                         listing_id=listing_id,
                         source_url=f"stanford_cars://{cid}/{counter:04d}",
                         local_path=str(img_path),
                         position=1,
                     ),
                 )
+                # Mirror the listing-level split into ``images.split``
+                # (Phase 3.5).
+                with conn:
+                    conn.execute(
+                        "UPDATE images SET split = ? WHERE image_id = ?",
+                        (split_name, image_id),
+                    )
                 out[cid].append(img_path)
     return out
 

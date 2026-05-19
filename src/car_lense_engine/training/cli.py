@@ -3,7 +3,7 @@
 Invoke via the ``phase5-train`` entry point declared in
 ``pyproject.toml``::
 
-    phase5-train [--db PATH] [--source stanford_cars]
+    phase5-train [--db PATH] [--source stanford_cars[,vmmrdb,...]]
                  [--train-split train] [--val-split test]
                  [--model MobileCLIP-S2] [--pretrained datacompdr]
                  [--device cpu|cuda|mps] [--batch-size N] [--num-workers N]
@@ -12,13 +12,19 @@ Invoke via the ``phase5-train`` entry point declared in
                  [--weight-decay F] [--warmup-epochs N]
                  [--label-smoothing F]
                  [--hard-neg-weight F] [--hard-neg-confusion-path PATH]
+                 [--resume-checkpoint PATH]
                  [--checkpoint-dir PATH] [--output PATH]
                  [--seed N] [-v]
 
-Trains a 196-way classification head over the MobileCLIP-S2 image
-encoder with hard-negative-aware cross-entropy weighting (derived from
-the Phase 5.1 confusion-pair JSON). Saves the best checkpoint (by val
-top-1) to ``models/checkpoints/`` and writes a JSON report.
+Trains a 196-way (or whatever the source dictates) classification head
+over the MobileCLIP-S2 image encoder with hard-negative-aware
+cross-entropy weighting (derived from the Phase 5.1 confusion-pair
+JSON). Saves the best checkpoint (by val top-1) to
+``models/checkpoints/`` and writes a JSON report.
+
+The ``--source`` flag accepts one or more comma-separated source names
+(e.g. ``compcars,vmmrdb,stanford_cars``) so a single training run can
+span every dataset the user wants to include.
 """
 
 from __future__ import annotations
@@ -35,6 +41,19 @@ from .train_classifier import (
     run_training,
     write_report,
 )
+
+
+def _parse_sources(raw: str) -> list[str]:
+    """Parse a comma-separated ``--source`` argument into a non-empty list.
+
+    Empty / whitespace-only entries (e.g. from a stray trailing comma)
+    are dropped. Raises :class:`ValueError` if the final list is empty.
+    """
+    items = [s.strip() for s in raw.split(",") if s.strip()]
+    if not items:
+        raise ValueError("at least one non-empty source is required")
+    return items
+
 
 DEFAULT_DB = Path("db/crawl.sqlite")
 DEFAULT_SOURCE = "stanford_cars"
@@ -82,7 +101,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--source",
         type=str,
         default=DEFAULT_SOURCE,
-        help=f"listings.source to train on (default: {DEFAULT_SOURCE})",
+        help=(
+            "one or more comma-separated ``listings.source`` values to "
+            f"train on (default: {DEFAULT_SOURCE}). Examples: "
+            "`stanford_cars`, `compcars,vmmrdb`, "
+            "`compcars,vmmrdb,stanford_cars`."
+        ),
     )
     parser.add_argument(
         "--train-split",
@@ -188,6 +212,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "optional path to a Phase 5.2 fine-tuned checkpoint .pt file; "
+            "when set, the image-encoder weights from the checkpoint are "
+            "overlaid on top of the pretrained backbone before training "
+            "starts (the classification head is always reinitialised "
+            "fresh because the class-id space may differ). Resumed runs "
+            "tag the saved checkpoint filename with ``_resumed`` so they "
+            "do not clobber the source checkpoint (default: none)"
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         type=Path,
         default=DEFAULT_CHECKPOINT_DIR,
@@ -239,6 +277,15 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
 
+    resume_checkpoint: Path | None = args.resume_checkpoint
+    if resume_checkpoint is not None and not resume_checkpoint.exists():
+        parser.error(f"--resume-checkpoint path does not exist: {resume_checkpoint}")
+
+    try:
+        sources = _parse_sources(args.source)
+    except ValueError as exc:
+        parser.error(f"--source: {exc}")
+
     # Resolve the confusion-pair file: if a path was passed but doesn't
     # exist, log a warning and disable hard-neg weighting (the underlying
     # builder already tolerates None; we surface the situation here so
@@ -255,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     config = TrainConfig(
         model_name=args.model,
         pretrained=args.pretrained,
-        source=args.source,
+        source=sources,
         train_split=args.train_split,
         val_split=args.val_split,
         device=args.device,
@@ -269,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         label_smoothing=args.label_smoothing,
         hard_neg_weight=args.hard_neg_weight,
         hard_neg_confusion_path=hn_path,
+        resume_checkpoint=resume_checkpoint,
         seed=args.seed,
     )
 

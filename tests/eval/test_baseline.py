@@ -30,9 +30,11 @@ from car_lense_engine.dataset.canonical_labels import year_to_generation
 from car_lense_engine.db import Image, Listing, images, listings, open_db
 from car_lense_engine.eval import baseline as baseline_mod
 from car_lense_engine.eval.baseline import (
+    EXTERIOR_VIEWS,
     BaselineConfig,
     BaselineReport,
     build_prototypes,
+    build_prototypes_by_view,
     class_id_for,
     evaluate,
 )
@@ -277,6 +279,17 @@ def _seed_dataset(
                         position=1,
                     ),
                 )
+                # Phase 3.5: the baseline filters on ``images.split``
+                # (migration 010), not ``listings.split``. Mirror the
+                # listing-level split into the per-image column so the
+                # fixture reflects what the make-splits CLI would have
+                # produced. The listing-level value is left in place
+                # for backwards compatibility but is no longer read.
+                with conn:
+                    conn.execute(
+                        "UPDATE images SET split = ? WHERE image_id = ?",
+                        (split_name, image_id),
+                    )
                 dest[cid].append(img_path)
     return train_paths, test_paths
 
@@ -328,6 +341,133 @@ def test_class_id_for_drops_nulls() -> None:
 def test_class_id_for_drops_empty_strings() -> None:
     assert class_id_for(2012, "", "RL") is None
     assert class_id_for(2012, "Acura", "") is None
+
+
+# --------------------------------------------------------------- _select_rows multi-source
+
+
+def test_select_rows_multiple_sources(db_path: Path, tmp_path: Path) -> None:
+    """``_select_rows`` filters by ``listings.source IN (...)`` when given a list.
+
+    Seed three rows across three different sources (``compcars``,
+    ``vmmrdb``, ``stanford_cars``). Passing ``["compcars", "vmmrdb"]``
+    must return exactly those two rows; the ``stanford_cars`` row must
+    be excluded. Passing a single source via the list form
+    (``["compcars"]``) must still work (back-compat). And passing the
+    legacy bare string still works (back-compat).
+    """
+    from car_lense_engine.eval.baseline import _select_rows
+
+    # Seed three listings, each with one image in the train split.
+    seeds = [
+        ("compcars", 2012, "Honda", "Civic"),
+        ("vmmrdb", 2012, "Toyota", "Camry"),
+        ("stanford_cars", 2012, "Tesla", "Model S"),
+    ]
+    conn = open_db(db_path)
+    try:
+        for i, (src, year, make, model) in enumerate(seeds):
+            gen_year = year_to_generation(year)
+            listing_id = f"{src}:multi_{i:04d}"
+            url = f"{src}://x/{i:04d}"
+            img_path = tmp_path / "imgs" / f"{src}_{i}.jpg"
+            _make_image_file(img_path)
+            listings.insert_listing(
+                conn,
+                Listing(
+                    listing_id=listing_id,
+                    source=src,
+                    url=url,
+                    year=year,
+                    make=make,
+                    model=model,
+                    split="train",
+                    canonical_make=make,
+                    canonical_model=model,
+                    generation_year=gen_year,
+                ),
+            )
+            image_id = f"{i:064d}"
+            images.insert_image(
+                conn,
+                Image(
+                    image_id=image_id,
+                    listing_id=listing_id,
+                    source_url=url,
+                    local_path=str(img_path),
+                    position=1,
+                ),
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE images SET split = ? WHERE image_id = ?",
+                    ("train", image_id),
+                )
+    finally:
+        conn.close()
+
+    # Multi-source: list of two -> exactly two rows, stanford_cars excluded.
+    conn = open_db(db_path)
+    try:
+        rows = _select_rows(conn, source=["compcars", "vmmrdb"], split="train")
+    finally:
+        conn.close()
+    cids = sorted(cid for cid, _view, _path in rows)
+    assert cids == sorted(
+        [
+            class_id_for(year_to_generation(2012), "Honda", "Civic"),
+            class_id_for(year_to_generation(2012), "Toyota", "Camry"),
+        ]
+    )
+    # stanford_cars (Tesla Model S) must not appear.
+    tesla = class_id_for(year_to_generation(2012), "Tesla", "Model S")
+    assert tesla not in cids
+
+    # Single-source list -> identical to legacy bare-string call.
+    conn = open_db(db_path)
+    try:
+        rows_list = _select_rows(conn, source=["compcars"], split="train")
+        rows_str = _select_rows(conn, source="compcars", split="train")
+    finally:
+        conn.close()
+    assert sorted(c for c, _v, _p in rows_list) == sorted(c for c, _v, _p in rows_str)
+    assert len(rows_list) == 1
+
+    # All three sources -> all three rows.
+    conn = open_db(db_path)
+    try:
+        rows_all = _select_rows(conn, source=["compcars", "vmmrdb", "stanford_cars"], split="train")
+    finally:
+        conn.close()
+    assert len(rows_all) == 3
+
+
+def test_select_rows_rejects_empty_source_list(db_path: Path) -> None:
+    """An empty source list raises ValueError -- there's nothing to filter on."""
+    from car_lense_engine.eval.baseline import _select_rows
+
+    open_db(db_path).close()  # apply migrations
+    conn = open_db(db_path)
+    try:
+        with pytest.raises(ValueError):
+            _select_rows(conn, source=[], split="train")
+    finally:
+        conn.close()
+
+
+def test_select_rows_rejects_empty_string_entry(db_path: Path) -> None:
+    """An empty / whitespace string entry raises ValueError."""
+    from car_lense_engine.eval.baseline import _select_rows
+
+    open_db(db_path).close()
+    conn = open_db(db_path)
+    try:
+        with pytest.raises(ValueError):
+            _select_rows(conn, source=["compcars", ""], split="train")
+        with pytest.raises(ValueError):
+            _select_rows(conn, source="   ", split="train")
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------- baseline e2e
@@ -706,6 +846,12 @@ def test_class_with_zero_train_excluded_from_prototypes(
                 position=1,
             ),
         )
+        # Mirror the listing-level split into ``images.split`` (Phase 3.5).
+        with conn:
+            conn.execute(
+                "UPDATE images SET split = ? WHERE image_id = ?",
+                ("test", "s" * 64),
+            )
     finally:
         conn.close()
 
@@ -792,16 +938,24 @@ def test_baseline_uses_canonical_fields_not_raw(
                         generation_year=2012,
                     ),
                 )
+                image_id = f"{i:030d}{split_name:>034}"
                 images.insert_image(
                     conn,
                     Image(
-                        image_id=f"{i:030d}{split_name:>034}",
+                        image_id=image_id,
                         listing_id=listing_id,
                         source_url=f"x://{listing_id}",
                         local_path=str(img_path),
                         position=1,
                     ),
                 )
+                # Mirror the listing-level split into ``images.split``
+                # (Phase 3.5).
+                with conn:
+                    conn.execute(
+                        "UPDATE images SET split = ? WHERE image_id = ?",
+                        (split_name, image_id),
+                    )
     finally:
         conn.close()
 
@@ -861,6 +1015,305 @@ def test_no_train_rows_returns_empty_prototypes(
         conn.close()
     assert cids == []
     assert proto.shape == (0, 0)
+
+
+# --------------------------------------------------------------- per-view prototypes
+
+
+def _seed_per_view_dataset(
+    conn: sqlite3.Connection,
+    *,
+    tmp_path: Path,
+    images_spec: list[tuple[str, str | None, int]],
+) -> dict[Path, tuple[str, str | None]]:
+    """Seed a tiny DB with one image per ``(class_id, view, class_index)`` entry.
+
+    ``images_spec`` is a list of ``(class_id, view, class_index)`` triples.
+    ``view`` may be one of the 5 exterior labels, ``"interior"`` for
+    non-exterior, or ``None``. Returns a ``path -> (class_id, view)``
+    map so the test can wire stub embeddings.
+    """
+    # Parse class_ids back to year/make/model.
+    out: dict[Path, tuple[str, str | None]] = {}
+    for offset, (class_id, view, _idx) in enumerate(images_spec):
+        year_s, make_lower, model_lower = class_id.split("|")
+        year = int(year_s)
+        counter = offset + 1
+        listing_id = f"stanford_cars:pv_{counter:04d}"
+        url = f"stanford_cars://{class_id}/{counter:04d}"
+        view_token = view if view is not None else "noview"
+        img_path = tmp_path / "imgs" / f"{class_id}_{view_token}_{counter}.jpg"
+        _make_image_file(img_path)
+        listings.insert_listing(
+            conn,
+            Listing(
+                listing_id=listing_id,
+                source="stanford_cars",
+                url=url,
+                year=year,
+                make=make_lower,
+                model=model_lower,
+                split="train",
+                canonical_make=make_lower,
+                canonical_model=model_lower,
+                generation_year=year,
+            ),
+        )
+        image_id = f"{counter:064d}"
+        images.insert_image(
+            conn,
+            Image(
+                image_id=image_id,
+                listing_id=listing_id,
+                source_url=url,
+                local_path=str(img_path),
+                position=1,
+            ),
+        )
+        # ``insert_image`` doesn't write the ``view`` / ``split`` columns
+        # (they're populated by Phase 3.3 / 3.5 CLIs), so push them via
+        # UPDATE the same way the production pipeline does.
+        with conn:
+            conn.execute(
+                "UPDATE images SET split = ?, view = ? WHERE image_id = ?",
+                ("train", view, image_id),
+            )
+        out[img_path] = (class_id, view)
+    return out
+
+
+def test_build_prototypes_by_view(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_path: Path,
+    patch_pil_to_carry_path: None,
+) -> None:
+    """Per-view prototype builder buckets by ``(class, view)`` and zeros gaps.
+
+    We seed three classes with varying view coverage:
+
+    * Class A has both ``front`` and ``rear`` images.
+    * Class B has only ``side`` images.
+    * Class C has only ``front`` images.
+    * One ``interior`` (non-exterior) row is included to verify it
+      gets filtered out before embedding.
+    * One row with ``view IS NULL`` is also included; same filter applies.
+
+    Expected output:
+
+    * ``class_ids`` are sorted across all three classes.
+    * Each per-view tensor has ``(3, embed_dim)`` shape.
+    * Rows for the present ``(class, view)`` cells have unit L2 norm.
+    * Rows for missing cells are all-zero.
+    * The total number of populated rows equals the number of
+      ``(class, view)`` cells that had at least one exterior row.
+    """
+    cid_a = "2012|honda|civic"
+    cid_b = "2012|toyota|camry"
+    cid_c = "2012|mazda|3"
+    # Build the seed list. Use 2 rows per cell to verify mean-pooling
+    # actually happens (a single row trivially L2-normalizes).
+    spec: list[tuple[str, str | None, int]] = [
+        (cid_a, "front", 0),
+        (cid_a, "front", 0),
+        (cid_a, "rear", 0),
+        (cid_a, "rear", 0),
+        (cid_b, "side", 1),
+        (cid_b, "side", 1),
+        (cid_c, "front", 2),
+        (cid_c, "front", 2),
+        # Filtered out:
+        (cid_a, "interior", 0),
+        (cid_a, None, 0),
+    ]
+    conn = open_db(db_path)
+    try:
+        path_map = _seed_per_view_dataset(conn, tmp_path=tmp_path, images_spec=spec)
+    finally:
+        conn.close()
+
+    # Embeddings: each (class, view) cell shares the same direction so
+    # the per-row mean is just that direction. Distinct directions per
+    # (class, view) so the L2-normalized rows are well-defined.
+    direction_for = {
+        (cid_a, "front"): _basis_embedding(0),
+        (cid_a, "rear"): _basis_embedding(1),
+        (cid_b, "side"): _basis_embedding(2),
+        (cid_c, "front"): _basis_embedding(3),
+    }
+    embeddings_by_path: dict[Path, torch.Tensor] = {}
+    for path, (cid, view) in path_map.items():
+        if (cid, view) in direction_for:
+            embeddings_by_path[path] = direction_for[(cid, view)]  # type: ignore[index]
+        else:
+            # Non-exterior / NULL rows shouldn't be embedded at all but
+            # we still register a dummy so the stub's path_index covers
+            # them (the production filter drops them before embedding).
+            embeddings_by_path[path] = _basis_embedding(7)
+    _install_stub_open_clip(monkeypatch, embeddings_by_path=embeddings_by_path)
+
+    config = BaselineConfig(
+        model_name="MobileCLIP-S2",
+        pretrained="datacompdr",
+        device="cpu",
+        batch_size=4,
+    )
+    conn = open_db(db_path)
+    try:
+        class_ids, prototypes_by_view = build_prototypes_by_view(
+            conn=conn, config=config, source="stanford_cars", split="train"
+        )
+    finally:
+        conn.close()
+
+    # Class ids are sorted; all 3 classes appear because each has at
+    # least one exterior row.
+    assert class_ids == sorted([cid_a, cid_b, cid_c])
+    idx_a = class_ids.index(cid_a)
+    idx_b = class_ids.index(cid_b)
+    idx_c = class_ids.index(cid_c)
+
+    # Every exterior view name must be present in the output dict,
+    # even when no class has a prototype for it.
+    assert set(prototypes_by_view.keys()) == set(EXTERIOR_VIEWS)
+
+    embed_dim = int(prototypes_by_view["front"].shape[1])
+    for view in EXTERIOR_VIEWS:
+        tensor = prototypes_by_view[view]
+        assert tensor.shape == (len(class_ids), embed_dim), view
+
+    # Populated rows: norm == 1.0 (approximately, after L2-normalize).
+    populated_cells = {
+        ("front", idx_a),
+        ("rear", idx_a),
+        ("side", idx_b),
+        ("front", idx_c),
+    }
+    for view in EXTERIOR_VIEWS:
+        tensor = prototypes_by_view[view]
+        for i in range(len(class_ids)):
+            norm = float(tensor[i].norm().item())
+            if (view, i) in populated_cells:
+                assert norm == pytest.approx(1.0, abs=1e-5), (view, i, norm)
+            else:
+                assert norm == pytest.approx(0.0, abs=1e-7), (view, i, norm)
+
+    # Three-quarter views had no training data: tensors must be all zeros.
+    assert float(prototypes_by_view["three-quarter-front"].abs().sum().item()) == 0.0
+    assert float(prototypes_by_view["three-quarter-rear"].abs().sum().item()) == 0.0
+
+
+def test_build_prototypes_by_view_returns_cpu_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_path: Path,
+    patch_pil_to_carry_path: None,
+) -> None:
+    """Regression: zero-fill rows for missing ``(class, view)`` cells used to
+    be allocated on CPU while real prototypes lived on the embedding
+    device (e.g. ``cuda:0``). ``torch.stack`` then crashed with::
+
+        RuntimeError: Expected all tensors to be on the same device, but got
+        tensors is on cuda:0, different from other tensors on cpu
+
+    The fix routes the zero allocation through ``embeddings.device`` and
+    moves the final per-view tensor to CPU before returning (consumers --
+    prototype cache, recognize_api -- expect CPU tensors).
+
+    We can't easily drive a CUDA tensor through the existing CPU-only
+    stubs, but the contract that catches the bug is symmetric: assert
+    every returned tensor lives on CPU. Combined with the existing
+    ``test_build_prototypes_by_view`` coverage (which exercises the
+    missing-cell path on multiple (class, view) combinations), this
+    locks in the post-``.cpu()`` behaviour.
+    """
+    cid_a = "2012|honda|civic"
+    cid_b = "2012|toyota|camry"
+    # Class A has only ``front``; class B has only ``side``. Every other
+    # exterior cell is missing and exercises the zero-fill path.
+    spec: list[tuple[str, str | None, int]] = [
+        (cid_a, "front", 0),
+        (cid_a, "front", 0),
+        (cid_b, "side", 1),
+        (cid_b, "side", 1),
+    ]
+    conn = open_db(db_path)
+    try:
+        path_map = _seed_per_view_dataset(conn, tmp_path=tmp_path, images_spec=spec)
+    finally:
+        conn.close()
+
+    direction_for = {
+        (cid_a, "front"): _basis_embedding(0),
+        (cid_b, "side"): _basis_embedding(1),
+    }
+    embeddings_by_path: dict[Path, torch.Tensor] = {
+        path: direction_for[(cid, view)]  # type: ignore[index]
+        for path, (cid, view) in path_map.items()
+    }
+    _install_stub_open_clip(monkeypatch, embeddings_by_path=embeddings_by_path)
+
+    config = BaselineConfig(
+        model_name="MobileCLIP-S2",
+        pretrained="datacompdr",
+        device="cpu",
+        batch_size=2,
+    )
+    conn = open_db(db_path)
+    try:
+        class_ids, prototypes_by_view = build_prototypes_by_view(
+            conn=conn, config=config, source="stanford_cars", split="train"
+        )
+    finally:
+        conn.close()
+
+    assert class_ids == sorted([cid_a, cid_b])
+    # Every per-view tensor (populated or fully zero-filled) must live on
+    # CPU after the ``.cpu()`` migration the fix introduces.
+    for view in EXTERIOR_VIEWS:
+        tensor = prototypes_by_view[view]
+        assert tensor.device.type == "cpu", (view, tensor.device)
+
+
+def test_build_prototypes_by_view_empty_when_no_exterior_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    db_path: Path,
+    patch_pil_to_carry_path: None,
+) -> None:
+    """When every row is non-exterior, the builder returns empty class_ids."""
+    cid = "2012|honda|civic"
+    spec: list[tuple[str, str | None, int]] = [
+        (cid, "interior", 0),
+        (cid, None, 0),
+    ]
+    conn = open_db(db_path)
+    try:
+        path_map = _seed_per_view_dataset(conn, tmp_path=tmp_path, images_spec=spec)
+    finally:
+        conn.close()
+
+    embeddings_by_path: dict[Path, torch.Tensor] = {p: _basis_embedding(0) for p in path_map}
+    _install_stub_open_clip(monkeypatch, embeddings_by_path=embeddings_by_path)
+
+    config = BaselineConfig(
+        model_name="MobileCLIP-S2",
+        pretrained="datacompdr",
+        device="cpu",
+        batch_size=2,
+    )
+    conn = open_db(db_path)
+    try:
+        class_ids, prototypes_by_view = build_prototypes_by_view(
+            conn=conn, config=config, source="stanford_cars", split="train"
+        )
+    finally:
+        conn.close()
+
+    assert class_ids == []
+    assert set(prototypes_by_view.keys()) == set(EXTERIOR_VIEWS)
+    for view in EXTERIOR_VIEWS:
+        assert int(prototypes_by_view[view].shape[0]) == 0
 
 
 # --------------------------------------------------------------- CLI smoke

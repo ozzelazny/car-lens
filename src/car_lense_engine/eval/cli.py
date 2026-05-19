@@ -3,7 +3,7 @@
 Invoke via the ``phase5-baseline`` entry point declared in
 ``pyproject.toml``::
 
-    phase5-baseline [--db PATH] [--source stanford_cars]
+    phase5-baseline [--db PATH] [--source stanford_cars[,vmmrdb,...]]
                     [--train-split train] [--test-split test]
                     [--model MobileCLIP-S2] [--pretrained datacompdr]
                     [--device cpu|cuda|mps] [--batch-size N]
@@ -12,6 +12,10 @@ Invoke via the ``phase5-baseline`` entry point declared in
 Builds one mean-embedding prototype per class from the train split, then
 reports top-K nearest-prototype accuracy on the test split. Writes the
 full :class:`~car_lense_engine.eval.baseline.BaselineReport` as JSON.
+
+The ``--source`` flag accepts one or more comma-separated source names
+(e.g. ``compcars,vmmrdb,stanford_cars``) so a single baseline run can
+span every dataset the user wants to include.
 """
 
 from __future__ import annotations
@@ -30,6 +34,21 @@ from .baseline import (
     summary_line,
     write_report,
 )
+
+
+def _parse_sources(raw: str) -> list[str]:
+    """Parse a comma-separated ``--source`` argument into a non-empty list.
+
+    Empty / whitespace-only entries (e.g. from a stray trailing comma)
+    are dropped. Raises :class:`ValueError` if the final list is empty;
+    the CLI converts that into ``parser.error(...)`` so the user gets
+    an actionable diagnostic.
+    """
+    items = [s.strip() for s in raw.split(",") if s.strip()]
+    if not items:
+        raise ValueError("at least one non-empty source is required")
+    return items
+
 
 DEFAULT_DB = Path("db/crawl.sqlite")
 DEFAULT_SOURCE = "stanford_cars"
@@ -66,7 +85,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--source",
         type=str,
         default=DEFAULT_SOURCE,
-        help=f"listings.source to evaluate against (default: {DEFAULT_SOURCE})",
+        help=(
+            "one or more comma-separated ``listings.source`` values to "
+            f"evaluate against (default: {DEFAULT_SOURCE}). Examples: "
+            "`compcars`, `compcars,vmmrdb`, `compcars,vmmrdb,stanford_cars`."
+        ),
     )
     parser.add_argument(
         "--train-split",
@@ -159,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.exists():
         parser.error(f"DB path does not exist: {db_path}")
 
+    try:
+        sources = _parse_sources(args.source)
+    except ValueError as exc:
+        parser.error(f"--source: {exc}")
+
     checkpoint_path: Path | None = args.checkpoint
     if checkpoint_path is not None and not checkpoint_path.exists():
         parser.error(f"--checkpoint path does not exist: {checkpoint_path}")
@@ -176,14 +204,14 @@ def main(argv: list[str] | None = None) -> int:
         prototypes = build_prototypes(
             conn=conn,
             config=config,
-            source=args.source,
+            source=sources,
             split=args.train_split,
         )
         report = evaluate(
             conn=conn,
             config=config,
             prototypes=prototypes,
-            source=args.source,
+            source=sources,
             split=args.test_split,
             per_class_top=args.per_class_top,
         )
