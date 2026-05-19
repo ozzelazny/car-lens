@@ -26,6 +26,10 @@ dependencies = [
     "datasets>=2.18",
     "huggingface-hub>=0.20",
     "scipy>=1.10",
+    "anthropic>=0.40.0",
+    "onnx>=1.15",
+    "onnxsim>=0.4.36",
+    "onnxruntime>=1.18",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +39,14 @@ dev = [
     "respx>=0.21",
     "ruff>=0.5",
     "mypy>=1.10",
+]
+# Heavy mobile-export converters. Optional because they drag transitive
+# deps (tensorflow / coremltools) that conflict with the torch pin on
+# some platforms. See ``src/car_lense_engine/export/mobile.py`` for
+# the install-order note.
+mobile = [
+    "coremltools>=8.0",
+    "onnx2tf>=1.20",
 ]
 
 [project.scripts]
@@ -46,10 +58,16 @@ view-label = "car_lense_engine.dataset.cli:main"
 import-stanford-cars = "car_lense_engine.dataset.stanford_cars_cli:main"
 import-vmmrdb = "car_lense_engine.dataset.vmmrdb_cli:main"
 import-compcars = "car_lense_engine.dataset.compcars_cli:main"
+import-wikimedia = "car_lense_engine.dataset.wikimedia_cli:main"
 canonicalize-labels = "car_lense_engine.dataset.canonicalize_cli:main"
+make-splits = "car_lense_engine.dataset.make_splits_cli:main"
 phase5-baseline = "car_lense_engine.eval.cli:main"
 phase5-train = "car_lense_engine.training.cli:main"
+train-view-classifier = "car_lense_engine.training.view_classifier_cli:main"
 build-prototypes = "car_lense_engine.eval.build_prototypes_cli:main"
+evaluate-recognize = "car_lense_engine.eval.evaluate_cli:main"
+export-mobile = "car_lense_engine.export.cli:main"
+validate-mobile-export = "car_lense_engine.export.validate:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/car_lense_engine"]
