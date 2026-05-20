@@ -1,43 +1,42 @@
 // VehicleDetector.swift
 //
-// Vehicle detector built on Vision's built-in VNRecognizeObjectsRequest.
-// Apple's stock model is good enough for the MVP — it recognizes cars, trucks,
-// buses, vans, SUVs, and motorcycles at low single-digit-ms latency on the
-// Neural Engine and ships with the OS, so we don't pay app-binary size for it.
-//
-// If we want tighter bounding boxes (Vision's are coarse) we can drop in a
-// shipped YOLOv8-n trained on COCO-vehicle classes — that's a v1.1 task.
+// Vehicle detector built on Apple's YOLOv3-Tiny Core ML model. The bundled
+// pipeline does image preprocessing, YOLO inference, and NMS in one shot, so
+// Vision returns `VNRecognizedObjectObservation`s directly. COCO classes —
+// we filter to the four wheeled-vehicle categories.
 //
 // Output is a list of `Detection` in Vision-space normalized coords.
 
+import CoreML
 import CoreVideo
 import Foundation
 import Vision
 
 final class VehicleDetector {
 
-    /// Vision's coarse vehicle labels. Anything else (people, food, etc.) is dropped.
+    /// COCO vehicle class names emitted by YOLOv3-Tiny.
     private static let vehicleLabels: Set<String> = [
-        "Car", "Truck", "Bus", "Van", "SUV", "Motorcycle",
-        // Lowercase variants — Vision label casing varies by iOS minor version.
-        "car", "truck", "bus", "van", "suv", "motorcycle"
+        "car", "truck", "bus", "motorcycle"
     ]
 
     /// Minimum detector confidence to surface a detection at all.
-    /// Tuned empirically: <0.30 is mostly false positives.
-    private static let minConfidence: Float = 0.30
+    private static let minConfidence: Float = 0.15
 
-    private let request: VNRecognizeObjectsRequest
+    private let request: VNCoreMLRequest
 
     init() {
-        // Apple's stock recognizer. Errors here would be a system-level problem;
-        // we crash rather than silently ship a no-op detector.
-        do {
-            self.request = try VNRecognizeObjectsRequest()
-        } catch {
-            fatalError("Failed to initialize VNRecognizeObjectsRequest: \(error)")
+        // Xcode compiles YOLOv3Tiny.mlmodel into YOLOv3Tiny.mlmodelc at build time.
+        guard let modelURL = Bundle.main.url(forResource: "YOLOv3Tiny", withExtension: "mlmodelc") else {
+            fatalError("YOLOv3Tiny.mlmodelc missing from app bundle")
         }
-        // Default model revision is fine; pin it later if we see drift across OS updates.
+        do {
+            let mlModel = try MLModel(contentsOf: modelURL)
+            let visionModel = try VNCoreMLModel(for: mlModel)
+            self.request = VNCoreMLRequest(model: visionModel)
+            self.request.imageCropAndScaleOption = .scaleFit
+        } catch {
+            fatalError("Failed to load YOLOv3Tiny: \(error)")
+        }
     }
 
     /// Runs detection synchronously on the given pixel buffer.
@@ -58,7 +57,19 @@ final class VehicleDetector {
             return []
         }
 
-        guard let observations = request.results else { return [] }
+        guard let observations = request.results as? [VNRecognizedObjectObservation] else {
+            print("[detect] no observations (results type: \(type(of: request.results)))")
+            return []
+        }
+
+        if !observations.isEmpty {
+            let summary = observations.prefix(5).map { o in
+                "\(o.labels.first?.identifier ?? "?")@\(String(format: "%.2f", o.confidence))"
+            }.joined(separator: ", ")
+            print("[detect] \(observations.count) obs: \(summary)")
+        } else {
+            print("[detect] 0 observations from YOLO")
+        }
 
         var detections: [Detection] = []
         detections.reserveCapacity(observations.count)

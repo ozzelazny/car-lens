@@ -87,32 +87,52 @@ final class Preprocessor {
     /// - Returns: MLMultiArray of shape [1, 3, H, W], dtype .float32.
     func preprocess(pixelBuffer: CVPixelBuffer, bbox: CGRect?) throws -> MLMultiArray {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let extent = ciImage.extent
 
-        // Convert Vision-normalized bbox (bottom-left origin) to CIImage
-        // pixel coords (also bottom-left origin — CI is the rare iOS API
-        // that matches Vision's convention). We just scale by extent.
+        // 1. Crop to the bbox, padded by ~15% on each side and clipped to the
+        //    image extent. The pad gives the classifier some context (wheels,
+        //    mirrors, silhouette beyond YOLO's tight box).
         let cropped: CIImage
         if let bbox = bbox {
-            let extent = ciImage.extent
+            let padFrac: CGFloat = 0.15
+            let cx = bbox.midX, cy = bbox.midY
+            let halfW = (bbox.width  * (1 + 2 * padFrac)) / 2
+            let halfH = (bbox.height * (1 + 2 * padFrac)) / 2
+            let padded = CGRect(x: cx - halfW, y: cy - halfH,
+                                width: halfW * 2, height: halfH * 2)
+                .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+
             let pixelRect = CGRect(
-                x: bbox.minX * extent.width + extent.minX,
-                y: bbox.minY * extent.height + extent.minY,
-                width:  bbox.width  * extent.width,
-                height: bbox.height * extent.height
+                x: padded.minX * extent.width + extent.minX,
+                y: padded.minY * extent.height + extent.minY,
+                width:  padded.width  * extent.width,
+                height: padded.height * extent.height
             ).integral
             cropped = ciImage.cropped(to: pixelRect)
         } else {
             cropped = ciImage
         }
 
-        // Resize to (width × height) using bilinear, per preprocessing.json.
-        // `CILanczosScaleTransform` is sharper but not bilinear. The spec says
-        // bilinear, so we use CIAffineTransform with the default sampler, which
-        // uses bilinear (CIImage's default is linear interpolation).
-        let scaleX = CGFloat(width)  / cropped.extent.width
-        let scaleY = CGFloat(height) / cropped.extent.height
-        let resized = cropped
-            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+        // 2. Match training preprocessing: resize so the SHORTEST side = 224,
+        //    aspect-preserving, then center-crop to 224×224. The previous code
+        //    stretched both axes to 224, which mismatched the training-time
+        //    "resize_shortest_then_center_crop" (per preprocessing.json) and
+        //    cost meaningful top-1 accuracy on non-square bboxes.
+        let translated = cropped.transformed(
+            by: CGAffineTransform(translationX: -cropped.extent.minX,
+                                  y: -cropped.extent.minY)
+        )
+        let cw = translated.extent.width
+        let ch = translated.extent.height
+        let shortest = min(cw, ch)
+        let scale = CGFloat(min(width, height)) / shortest
+        let scaled = translated.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaledW = scaled.extent.width
+        let scaledH = scaled.extent.height
+        let cropX = (scaledW - CGFloat(width))  / 2
+        let cropY = (scaledH - CGFloat(height)) / 2
+        let resized = scaled
+            .transformed(by: CGAffineTransform(translationX: -cropX, y: -cropY))
             .cropped(to: CGRect(x: 0, y: 0, width: width, height: height))
 
         // Render to a CGImage so we can pull RGBA bytes at known stride.

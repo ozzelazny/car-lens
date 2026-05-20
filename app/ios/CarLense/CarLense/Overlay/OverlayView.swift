@@ -34,8 +34,11 @@ struct OverlayView: View {
                             .position(x: rect.midX, y: rect.midY)
 
                         labelView(pred: pred, color: color, det: det)
-                            .position(x: rect.minX + 4, y: max(12, rect.minY - 12))
-                            .frame(maxWidth: rect.width, alignment: .leading)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .position(
+                                x: min(geo.size.width - 8, rect.minX + 4),
+                                y: max(20, rect.minY - 18)
+                            )
                     }
                 }
             }
@@ -52,12 +55,12 @@ struct OverlayView: View {
             text = "…"  // classifier hasn't returned yet for this slot
         }
         return Text(text)
-            .font(.caption2.monospacedDigit())
+            .font(.footnote.weight(.semibold).monospacedDigit())
             .foregroundColor(.black)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .background(color)
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
             .lineLimit(1)
     }
 

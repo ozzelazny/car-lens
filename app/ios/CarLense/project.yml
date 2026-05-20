@@ -25,23 +25,25 @@ targets:
     sources:
       - path: CarLense
         excludes:
-          - "Resources/**"          # Resources handled below so .mlpackage is added as a folder reference
-    # Resources need to be listed individually so Xcode compiles the .mlpackage
-    # (a folder treated as a single resource) rather than copying it as a
-    # raw directory. Listing a folder reference here would copy bytes-as-is
-    # and Core ML would fail to load at runtime.
-    #
-    # If any of these files are missing when the user builds, the build fails
-    # with a clear "Build input file cannot be found" error pointing at the
-    # missing asset, which is the right failure mode.
-    resources:
+          - "Resources/**"
+      # Each resource is listed as its own source with buildPhase: resources.
+      # .mlmodel / .mlpackage entries trigger Core ML's build-time compilation
+      # to .mlmodelc inside the app bundle. (xcodegen's top-level `resources:`
+      # field is silently ignored — only `sources` makes it into the pbxproj.)
       - path: CarLense/Resources/model.mlpackage
+        buildPhase: resources
+        optional: true
+      - path: CarLense/Resources/YOLOv3Tiny.mlmodel
+        buildPhase: resources
         optional: true
       - path: CarLense/Resources/prototypes.bin
+        buildPhase: resources
         optional: true
       - path: CarLense/Resources/class_names.json
+        buildPhase: resources
         optional: true
       - path: CarLense/Resources/preprocessing.json
+        buildPhase: resources
         optional: true
     info:
       path: CarLense/Info.plist
@@ -64,7 +66,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ashzelazny.carlense
         PRODUCT_NAME: CarLense
-        DEVELOPMENT_TEAM: ""        # <-- Fill this in via Xcode "Signing & Capabilities"
+        DEVELOPMENT_TEAM: "572T55Q5XS"
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"  # iPhone only
         ENABLE_BITCODE: NO

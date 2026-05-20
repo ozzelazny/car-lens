@@ -64,9 +64,12 @@ final class ViewModel: ObservableObject {
             // Load models on a background task — this is ~200ms cold.
             Task.detached(priority: .userInitiated) { [pipeline] in
                 do {
+                    print("[classifier] loading from bundle…")
                     let cls = try Classifier.loadFromBundle()
+                    print("[classifier] loaded ok")
                     pipeline.installClassifier(cls)
                 } catch {
+                    print("[classifier] LOAD FAILED: \(error)")
                     await MainActor.run {
                         self.errorMessage = "Model load failed: \(error)"
                     }
@@ -88,9 +91,9 @@ final class ViewModel: ObservableObject {
 
     // MARK: - Publish (called from camera queue, hops to MainActor)
 
-    fileprivate func publish(detections snapshot: [(Detection, Prediction?)]?,
-                             fps: Double?,
-                             lastClassifyMs: Double?) {
+    fileprivate nonisolated func publish(detections snapshot: [(Detection, Prediction?)]?,
+                                         fps: Double?,
+                                         lastClassifyMs: Double?) {
         Task { @MainActor in
             if let snapshot { self.detections = snapshot }
             if let f = fps { self.fps = f }
@@ -116,6 +119,14 @@ private final class PipelineState {
     private var roundRobinSlot: Int = 0
     private var lastPredictions: [Int: Prediction] = [:]
     private var classifyInFlight: Bool = false
+
+    // Temporal smoothing: per-slot history of raw classifier outputs.
+    // Smoothed prediction = mode-vote on top-1 displayName, confidence =
+    // mean confidence of winning-class frames × (winning-class vote share).
+    // This reduces flicker AND raises perceived confidence when the classifier
+    // is consistent across frames — exactly the v1.1 behavior the README promised.
+    private var predictionHistory: [Int: [Prediction]] = [:]
+    private let smoothingWindow: Int = 8
 
     private var lastFpsTick: CFTimeInterval = CACurrentMediaTime()
     private var framesSinceFpsTick: Int = 0
@@ -151,9 +162,12 @@ private final class PipelineState {
         }
         detectionCounter &+= 1
 
+        // Biggest-car-only: take just the single most prominent detection
+        // (largest bbox × confidence). Multi-car classification was producing
+        // jumpy labels and the smoother needs one steady target.
         let rawDets = detector.detect(in: pixelBuffer, orientation: orientation)
             .sorted { $0.score > $1.score }
-            .prefix(3)
+            .prefix(1)
 
         // Re-index by sorted position so detection.id is stable for round-robin slots.
         var dets: [Detection] = []
@@ -187,7 +201,17 @@ private final class PipelineState {
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let t0 = CACurrentMediaTime()
-            let preds = (try? classifier.classify(pixelBuffer: bufCopy, bbox: bbox)) ?? []
+            let preds: [Prediction]
+            do {
+                preds = try classifier.classify(pixelBuffer: bufCopy, bbox: bbox)
+                let summary = preds.map {
+                    "\($0.displayName)@\(String(format: "%.2f", $0.confidence))"
+                }.joined(separator: " | ")
+                print("[classify] top-\(preds.count): \(summary)")
+            } catch {
+                print("[classify] THREW: \(error)")
+                preds = []
+            }
             let dt = (CACurrentMediaTime() - t0) * 1000
             self?.applyClassify(targetId: targetId, preds: preds, latencyMs: dt, publish: publish)
         }
@@ -200,12 +224,32 @@ private final class PipelineState {
                                publish: @escaping ([(Detection, Prediction?)]?, Double?, Double?) -> Void) {
         classifyInFlight = false
         if let top = preds.first {
-            lastPredictions[targetId] = top
+            var hist = predictionHistory[targetId] ?? []
+            hist.append(top)
+            if hist.count > smoothingWindow {
+                hist.removeFirst(hist.count - smoothingWindow)
+            }
+            predictionHistory[targetId] = hist
+            lastPredictions[targetId] = Self.smoothed(history: hist) ?? top
         }
-        // No detection snapshot to merge from here — the next frame's processFrame
-        // will fold in the new prediction via lastPredictions lookup. We still
-        // publish the latency so the status bar updates immediately.
         publish(nil, nil, latencyMs)
+    }
+
+    /// Mode-vote smoothing over a window of raw classifier outputs.
+    private static func smoothed(history: [Prediction]) -> Prediction? {
+        guard !history.isEmpty else { return nil }
+        var counts: [String: (count: Int, sumConf: Float, classId: String)] = [:]
+        for p in history {
+            var entry = counts[p.displayName] ?? (0, 0, p.classId)
+            entry.count += 1
+            entry.sumConf += p.confidence
+            counts[p.displayName] = entry
+        }
+        guard let winner = counts.max(by: { $0.value.count < $1.value.count }) else { return nil }
+        let avgConf = winner.value.sumConf / Float(winner.value.count)
+        return Prediction(classId: winner.value.classId,
+                          displayName: winner.key,
+                          confidence: avgConf)
     }
 }
 
